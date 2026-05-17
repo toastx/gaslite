@@ -1,0 +1,42 @@
+{
+  "id": "ERC20_BALANCE_OF",
+  "category": "tokens",
+  "version": "1.0",
+  "title": "Optimized balanceOf using scratch space slot derivation",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20.sol",
+  "difficulty": "low",
+  "mantle_specific": true,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "balanceOf mapping lookup",
+    "single storage read for balance",
+    "address to balance slot derivation"
+  ],
+
+  "solidity_before": "function balanceOf(address owner) public view returns (uint256) {\n    return balances[owner];\n}",
+
+  "yul_optimized": "assembly {\n    mstore(0x0c, _BALANCE_SLOT_SEED)\n    mstore(0x00, owner)\n    result := sload(keccak256(0x0c, 0x20))\n}",
+
+  "patterns_used": [
+    "SCRATCH_SPACE_SLOT_HASH",
+    "SLOT_SEED_PACKING"
+  ],
+
+  "explanation": "Instead of a standard mapping slot (keccak256(abi.encode(key, slot))), solady uses a packed seed written at 0x0c overlapping with the address at 0x00. This computes the slot in 32 bytes of scratch space instead of allocating new memory, saving memory expansion gas. The seed 0x87a211a2 fits in 4 bytes, written at offset 0x0c so it sits right after the 20-byte address.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per call",
+  "gas_estimate": "low",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Any mapping lookup where key is an address",
+  "when_not_to_apply": "Nested mappings with multiple keys that don't fit in scratch space",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

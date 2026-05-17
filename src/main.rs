@@ -1,5 +1,4 @@
 use std::sync::Arc;
-
 use axum::{extract::State, response::IntoResponse, routing::get, Json, Router};
 use libsql::Database;
 use serde::{Deserialize, Serialize};
@@ -59,4 +58,5 @@ async fn main(
         .with_state(client);
 
     Ok(router.into())
+
 }

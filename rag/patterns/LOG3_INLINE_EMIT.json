@@ -1,0 +1,29 @@
+{
+  "id": "LOG3_INLINE_EMIT",
+  "title": "Emit events inline using log3 with precomputed event signature",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "emit Transfer event",
+    "emit Approval event",
+    "event emission in token contract",
+    "indexed event with two address topics"
+  ],
+
+  "description": "Using log3 directly with a precomputed keccak256 event signature constant avoids the ABI encoding overhead of Solidity's emit. The event data is written directly to scratch space or already-used memory, and log3 reads it without additional allocation.",
+
+  "pattern_before": "emit Transfer(from, to, amount);",
+
+  "pattern_after": "// amount already in memory at 0x20 from prior operations\nlog3(0x20, 0x20, _TRANSFER_EVENT_SIGNATURE, from, to)\n// _TRANSFER_EVENT_SIGNATURE = keccak256('Transfer(address,address,uint256)')",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Event emission where data is already in memory from prior operations",
+  "when_not_to_apply": "Complex events with dynamic types, events where data needs fresh encoding",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

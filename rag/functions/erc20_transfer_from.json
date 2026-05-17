@@ -1,0 +1,47 @@
+{
+  "id": "ERC20_TRANSFER_FROM",
+  "category": "tokens",
+  "version": "1.0",
+  "title": "Optimized ERC20 transferFrom with allowance check and Permit2 infinite allowance fast path",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20.sol",
+  "difficulty": "hard",
+  "mantle_specific": true,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC20 transferFrom function",
+    "allowance check before transfer",
+    "spender allowance decrement",
+    "balance update with allowance guard"
+  ],
+
+  "solidity_before": "function transferFrom(address from, address to, uint256 amount) public virtual returns (bool) {\n    uint256 allowed = allowance[from][msg.sender];\n    if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;\n    balances[from] -= amount;\n    balances[to] += amount;\n    emit Transfer(from, to, amount);\n    return true;\n}",
+
+  "yul_optimized": "assembly {\n    let from_ := shl(96, from)\n    // Compute the allowance slot and load its value.\n    mstore(0x20, caller())\n    mstore(0x0c, or(from_, _ALLOWANCE_SLOT_SEED))\n    let allowanceSlot := keccak256(0x0c, 0x34)\n    let allowance_ := sload(allowanceSlot)\n    // If the allowance is not the maximum uint256 value.\n    if not(allowance_) {\n        if gt(amount, allowance_) {\n            mstore(0x00, 0x13be252b) // InsufficientAllowance()\n            revert(0x1c, 0x04)\n        }\n        sstore(allowanceSlot, sub(allowance_, amount))\n    }\n    // Compute balance slots using packed from_\n    mstore(0x0c, or(from_, _BALANCE_SLOT_SEED))\n    let fromBalanceSlot := keccak256(0x0c, 0x20)\n    let fromBalance := sload(fromBalanceSlot)\n    if gt(amount, fromBalance) {\n        mstore(0x00, 0xf4d678b8) // InsufficientBalance()\n        revert(0x1c, 0x04)\n    }\n    sstore(fromBalanceSlot, sub(fromBalance, amount))\n    mstore(0x00, to)\n    let toBalanceSlot := keccak256(0x0c, 0x20)\n    sstore(toBalanceSlot, add(sload(toBalanceSlot), amount))\n    mstore(0x20, amount)\n    log3(0x20, 0x20, _TRANSFER_EVENT_SIGNATURE, shr(96, from_), shr(96, mload(0x0c)))\n}",
+
+  "patterns_used": [
+    "ADDRESS_SHIFT_PACKING",
+    "INFINITE_ALLOWANCE_FAST_PATH",
+    "SLOT_SEED_PACKING",
+    "CUSTOM_ERROR_4BYTE",
+    "SLOAD_CACHE_BEFORE_SSTORE",
+    "LOG3_INLINE_EMIT"
+  ],
+
+  "explanation": "Key optimizations: (1) shl(96, from) packs the address into upper bits, reused across multiple slot computations saving repeated mstore calls, (2) if not(allowance_) checks for max uint256 in one opcode skipping the decrement entirely for infinite allowances, (3) allowance and balance slots both derived using the packed from_ avoiding redundant address operations, (4) Permit2 infinite allowance short-circuits the entire allowance check path.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per call",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "medium",
+  "when_to_apply": "Any ERC20 transferFrom with standard allowance mapping",
+  "when_not_to_apply": "Non-standard allowance logic, permit-only tokens, tokens where max allowance should be decremented",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

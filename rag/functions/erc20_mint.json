@@ -1,0 +1,44 @@
+{
+  "id": "ERC20_MINT",
+  "category": "tokens",
+  "version": "1.0",
+  "title": "Optimized _mint with overflow check and inline total supply update",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20.sol",
+  "difficulty": "medium",
+  "mantle_specific": true,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "mint function total supply increase",
+    "overflow check on totalSupply",
+    "balance increase without transfer from"
+  ],
+
+  "solidity_before": "function _mint(address to, uint256 amount) internal virtual {\n    totalSupply += amount;\n    balances[to] += amount;\n    emit Transfer(address(0), to, amount);\n}",
+
+  "yul_optimized": "assembly {\n    let totalSupplyBefore := sload(_TOTAL_SUPPLY_SLOT)\n    let totalSupplyAfter := add(totalSupplyBefore, amount)\n    // Revert if the total supply overflows.\n    if lt(totalSupplyAfter, totalSupplyBefore) {\n        mstore(0x00, 0xe5cfe957) // TotalSupplyOverflow()\n        revert(0x1c, 0x04)\n    }\n    sstore(_TOTAL_SUPPLY_SLOT, totalSupplyAfter)\n    mstore(0x0c, _BALANCE_SLOT_SEED)\n    mstore(0x00, to)\n    let toBalanceSlot := keccak256(0x0c, 0x20)\n    sstore(toBalanceSlot, add(sload(toBalanceSlot), amount))\n    mstore(0x20, amount)\n    log3(0x20, 0x20, _TRANSFER_EVENT_SIGNATURE, 0, shr(96, mload(0x0c)))\n}",
+
+  "patterns_used": [
+    "OVERFLOW_CHECK_LT",
+    "CUSTOM_ERROR_4BYTE",
+    "SCRATCH_SPACE_SLOT_HASH",
+    "LOG3_INLINE_EMIT"
+  ],
+
+  "explanation": "Overflow is checked using lt(after, before) — if addition wrapped around, after will be less than before. This is cheaper than Solidity's built-in checked arithmetic which uses a separate opcode sequence. totalSupply is loaded once, incremented, checked, and stored — single SLOAD for the check.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per call",
+  "gas_estimate": "medium",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Any mint function that increments totalSupply and a balance",
+  "when_not_to_apply": "Tokens with max supply caps requiring additional checks, rebasing tokens",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

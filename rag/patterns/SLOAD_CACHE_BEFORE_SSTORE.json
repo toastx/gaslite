@@ -1,0 +1,31 @@
+{
+  "id": "SLOAD_CACHE_BEFORE_SSTORE",
+  "title": "Cache sload result in local variable before using in check and sstore",
+  "category": "storage",
+
+  "trigger_patterns": [
+    "balance check then update",
+    "read modify write pattern",
+    "storage value used twice",
+    "sload used in condition and arithmetic"
+  ],
+
+  "description": "Reading a storage slot once and caching in a YUL local variable avoids a second SLOAD (800 gas on Mantle) when the value is needed for both a conditional check and an arithmetic update.",
+
+  "pattern_before": "// Two SLOADs — one implicit in require, one in update\nrequire(balances[from] >= amount);\nbalances[from] -= amount;",
+
+  "pattern_after": "let fromBalanceSlot := keccak256(0x0c, 0x20)\nlet fromBalance := sload(fromBalanceSlot)  // single SLOAD\nif gt(amount, fromBalance) {\n    mstore(0x00, 0xf4d678b8)\n    revert(0x1c, 0x04)\n}\nsstore(fromBalanceSlot, sub(fromBalance, amount))  // reuses cached value",
+
+  "gas_saved_mantle": 800,
+  "gas_saved_l1": 2100,
+  "gas_saved_unit": "per call (one avoided SLOAD)",
+  "gas_estimate": "high",
+  "benchmarked_via": "opcode_cost",
+
+  "when_to_apply": "Any read-check-write pattern on the same storage slot",
+  "when_not_to_apply": "When the value may change between read and write due to reentrancy (use checks-effects-interactions instead)",
+
+  "risk_level": "low",
+  "mantle_specific": true,
+  "source": "solady"
+}

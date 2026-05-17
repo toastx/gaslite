@@ -1,0 +1,28 @@
+{
+  "id": "INFINITE_ALLOWANCE_FAST_PATH",
+  "title": "Skip allowance decrement for max uint256 using if not(allowance_)",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "allowance check in transferFrom",
+    "type(uint256).max allowance skip",
+    "infinite allowance optimization"
+  ],
+
+  "description": "if not(allowance_) evaluates to true when allowance_ is NOT max uint256 (since not(max) = 0 = false). This single opcode replaces a comparison against type(uint256).max, skipping the sstore decrement for infinite approvals.",
+
+  "pattern_before": "if (allowed != type(uint256).max) {\n    allowance[from][msg.sender] = allowed - amount;\n}",
+
+  "pattern_after": "let allowance_ := sload(allowanceSlot)\nif not(allowance_) {\n    if gt(amount, allowance_) {\n        mstore(0x00, 0x13be252b)\n        revert(0x1c, 0x04)\n    }\n    sstore(allowanceSlot, sub(allowance_, amount))\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Any transferFrom that supports infinite allowances",
+  "when_not_to_apply": "Protocols that explicitly require max allowance to be decremented",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

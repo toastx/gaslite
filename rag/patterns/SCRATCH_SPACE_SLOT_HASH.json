@@ -1,0 +1,29 @@
+{
+  "id": "SCRATCH_SPACE_SLOT_HASH",
+  "title": "Use EVM scratch space (0x00-0x3f) for slot derivation",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "mapping slot computation",
+    "keccak256 for storage slot",
+    "address key mapping lookup",
+    "mstore before keccak256"
+  ],
+
+  "description": "EVM reserves 0x00-0x3f as scratch space — safe to use without updating the free memory pointer at 0x40. Writing slot inputs here avoids memory expansion gas entirely.",
+
+  "pattern_before": "// Standard — allocates new memory\nbytes32 slot = keccak256(abi.encode(owner, BALANCE_SLOT));",
+
+  "pattern_after": "// Optimized — uses scratch space\nmstore(0x0c, _BALANCE_SLOT_SEED)\nmstore(0x00, owner)\nlet slot := keccak256(0x0c, 0x20)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any mapping slot computation where inputs fit in 64 bytes",
+  "when_not_to_apply": "Nested mappings requiring more than 64 bytes of input, when scratch space is already in use by outer assembly block",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

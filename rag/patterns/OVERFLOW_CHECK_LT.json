@@ -1,0 +1,28 @@
+{
+  "id": "OVERFLOW_CHECK_LT",
+  "title": "Check addition overflow using lt(after, before) instead of checked arithmetic",
+  "category": "math",
+
+  "trigger_patterns": [
+    "totalSupply addition overflow check",
+    "uint256 addition that could overflow",
+    "safe add pattern"
+  ],
+
+  "description": "When two uint256 values are added and the result overflows, it wraps around to a smaller value. Checking lt(result, operand) detects this in a single opcode, cheaper than Solidity's built-in overflow detection which compiles to a more expensive sequence.",
+
+  "pattern_before": "// Solidity checked math — compiler generates extra opcodes\ntotalSupply += amount;",
+
+  "pattern_after": "let before := sload(_TOTAL_SUPPLY_SLOT)\nlet after := add(before, amount)\nif lt(after, before) {\n    mstore(0x00, 0xe5cfe957) // TotalSupplyOverflow()\n    revert(0x1c, 0x04)\n}\nsstore(_TOTAL_SUPPLY_SLOT, after)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any uint256 addition where overflow is possible and must be caught",
+  "when_not_to_apply": "Additions that are provably safe (e.g. sum of values already bounded by totalSupply)",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

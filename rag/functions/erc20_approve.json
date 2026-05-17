@@ -1,0 +1,45 @@
+{
+  "id": "ERC20_APPROVE",
+  "category": "tokens",
+  "version": "1.0",
+  "title": "Optimized ERC20 approve with inline slot computation and event emission",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20.sol",
+  "difficulty": "low",
+  "mantle_specific": true,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC20 approve function",
+    "allowance mapping update",
+    "approval event emission",
+    "spender allowance set"
+  ],
+
+  "solidity_before": "function approve(address spender, uint256 amount) public virtual returns (bool) {\n    allowance[msg.sender][spender] = amount;\n    emit Approval(msg.sender, spender, amount);\n    return true;\n}",
+
+  "yul_optimized": "assembly {\n    mstore(0x20, spender)\n    mstore(0x0c, _ALLOWANCE_SLOT_SEED)\n    mstore(0x00, caller())\n    sstore(keccak256(0x0c, 0x34), amount)\n    // Emit the {Approval} event.\n    mstore(0x00, amount)\n    log3(0x00, 0x20, _APPROVAL_EVENT_SIGNATURE, caller(), shr(96, mload(0x2c)))\n}",
+
+  "patterns_used": [
+    "SCRATCH_SPACE_SLOT_HASH",
+    "SLOT_SEED_PACKING",
+    "LOG3_INLINE_EMIT",
+    "MEMORY_REUSE_FOR_EVENT"
+  ],
+
+  "explanation": "Memory at 0x00-0x3f (scratch space) is reused across the slot computation and the event emission. After sstore, amount is written to 0x00 and the spender address already at 0x2c is extracted with shr(96) for the log3 topic — zero additional memory allocation needed.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per call",
+  "gas_estimate": "medium",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Any standard ERC20 approve function",
+  "when_not_to_apply": "Tokens with approval callbacks, ERC777-style operators",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

@@ -1,0 +1,28 @@
+{
+  "id": "CUSTOM_ERROR_4BYTE",
+  "title": "Revert with 4-byte custom error selector instead of string",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "revert with string message",
+    "require with string",
+    "error string in revert"
+  ],
+
+  "description": "Custom errors cost 4 bytes of calldata vs potentially hundreds for a string. In assembly, write the selector at 0x1c and revert(0x1c, 0x04) to return exactly 4 bytes.",
+
+  "pattern_before": "require(balance >= amount, \"InsufficientBalance\");",
+
+  "pattern_after": "if gt(amount, balance) {\n    mstore(0x00, 0xf4d678b8) // bytes4(keccak256('InsufficientBalance()'))\n    revert(0x1c, 0x04)\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Any revert with a string message",
+  "when_not_to_apply": "When error parameters need to be returned with the selector",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

@@ -1,0 +1,28 @@
+{
+  "id": "ADDRESS_SHIFT_PACKING",
+  "title": "Pack address into upper bits with shl(96) for reuse across multiple slot computations",
+  "category": "bitwise",
+
+  "trigger_patterns": [
+    "same address used in multiple slot computations",
+    "from address used for both balance and allowance slot",
+    "repeated mstore of same address"
+  ],
+
+  "description": "Shifting an address left by 96 bits (shl(96, addr)) packs it into the upper 160 bits of a uint256. This packed value can then be OR-ed with different seeds to derive multiple different slots without re-mstore-ing the address each time.",
+
+  "pattern_before": "// Repeated address loads\nmstore(0x00, from)\nmstore(0x20, ALLOWANCE_SEED)\nlet allowanceSlot := keccak256(0x00, 0x40)\nmstore(0x00, from)\nmstore(0x20, BALANCE_SEED)\nlet balanceSlot := keccak256(0x00, 0x40)",
+
+  "pattern_after": "// Pack once, reuse\nlet from_ := shl(96, from)\nmstore(0x0c, or(from_, _ALLOWANCE_SLOT_SEED))\nlet allowanceSlot := keccak256(0x0c, 0x34)\nmstore(0x0c, or(from_, _BALANCE_SLOT_SEED))\nlet balanceSlot := keccak256(0x0c, 0x20)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Functions that derive multiple storage slots from the same address",
+  "when_not_to_apply": "Single slot derivation where packing adds complexity without benefit",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

@@ -1,0 +1,46 @@
+{
+  "id": "ERC20_TRANSFER",
+  "category": "tokens",
+  "version": "1.0",
+  "title": "Optimized ERC20 transfer with inline assembly",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20.sol",
+  "difficulty": "medium",
+  "mantle_specific": true,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC20 transfer function",
+    "balance update from sender to receiver",
+    "transfer event emission",
+    "insufficient balance revert"
+  ],
+
+  "solidity_before": "function transfer(address to, uint256 amount) public virtual returns (bool) {\n    if (balances[msg.sender] < amount) revert InsufficientBalance();\n    balances[msg.sender] -= amount;\n    balances[to] += amount;\n    emit Transfer(msg.sender, to, amount);\n    return true;\n}",
+
+  "yul_optimized": "assembly {\n    // Compute the balance slot and load its value.\n    mstore(0x0c, _BALANCE_SLOT_SEED)\n    mstore(0x00, caller())\n    let fromBalanceSlot := keccak256(0x0c, 0x20)\n    let fromBalance := sload(fromBalanceSlot)\n    // Revert if insufficient balance.\n    if gt(amount, fromBalance) {\n        mstore(0x00, 0xf4d678b8) // `InsufficientBalance()`.\n        revert(0x1c, 0x04)\n    }\n    // Subtract and store the updated balance.\n    sstore(fromBalanceSlot, sub(fromBalance, amount))\n    // Compute the balance slot of `to`.\n    mstore(0x00, to)\n    let toBalanceSlot := keccak256(0x0c, 0x20)\n    // Add and store the updated balance of `to`.\n    sstore(toBalanceSlot, add(sload(toBalanceSlot), amount))\n    // Emit the {Transfer} event.\n    mstore(0x20, amount)\n    log3(0x20, 0x20, _TRANSFER_EVENT_SIGNATURE, caller(), shr(96, mload(0x0c)))\n}",
+
+  "patterns_used": [
+    "CUSTOM_ERROR_4BYTE",
+    "SCRATCH_SPACE_SLOT_HASH",
+    "SLOT_SEED_PACKING",
+    "LOG3_INLINE_EMIT",
+    "SLOAD_CACHE_BEFORE_SSTORE"
+  ],
+
+  "explanation": "Five techniques combined: (1) custom 4-byte error selector avoids string storage, (2) scratch space 0x00-0x2b used for keccak256 slot computation avoiding memory expansion, (3) slot seed packing mixes address into seed for collision-free slot derivation, (4) log3 emits Transfer event without ABI encoding overhead, (5) fromBalance is sload-ed once and reused for both the check and the sstore.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per call",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "medium",
+  "when_to_apply": "Any ERC20 transfer implementation using mapping-based balances",
+  "when_not_to_apply": "Contracts with custom balance logic, rebasing tokens, tokens with transfer hooks that modify balances",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}
