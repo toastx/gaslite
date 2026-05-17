@@ -28,29 +28,23 @@ struct OptimizeResponse {
     optimized_code: String,
 }
 
-// Expected format from your parsed files
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct RagPatternJson {
-    id: String,
-    category: String,
-    title: String,
-    yul_optimized: String,
-    explanation: String,
+#[derive(Deserialize)]
+struct SeedPatternPayload {
+    metadata: serde_json::Value,
+    vector: Vec<f32>, 
 }
 
-#[tokio::main]
-async fn main() -> shuttle_axum::ShuttleAxum {
-    // 1. Fetch environment variables safely
-    let deepseek_api_key = std::env::var("DEEPSEEK_API_KEY")
-        .expect("DEEPSEEK_API_KEY must be set");
-    let qdrant_api_key = std::env::var("QDRANT_API_KEY")
-        .expect("QDRANT_API_KEY must be set");
-    let qdrant_url = std::env::var("QDRANT_CLUSTER_URL")
-        .expect("QDRANT_CLUSTER_URL must be set");
-    let turso_url = std::env::var("TURSO_DATABASE_URL")
-        .expect("TURSO_DATABASE_URL must be set");
-    let turso_token = std::env::var("TURSO_AUTH_TOKEN")
-        .expect("TURSO_AUTH_TOKEN must be set");
+#[shuttle_runtime::main]
+async fn main(
+    #[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore,
+) -> shuttle_axum::ShuttleAxum {
+    
+    // 1. Fetch secrets via Shuttle's SecretStore (prevents crashes)
+    let deepseek_api_key = secrets.get("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY is required");
+    let qdrant_api_key = secrets.get("QDRANT_API_KEY").expect("QDRANT_API_KEY is required");
+    let qdrant_url = secrets.get("QDRANT_CLUSTER_URL").expect("QDRANT_CLUSTER_URL is required");
+    let turso_url = secrets.get("TURSO_DATABASE_URL").expect("TURSO_DATABASE_URL is required");
+    let turso_token = secrets.get("TURSO_AUTH_TOKEN").expect("TURSO_AUTH_TOKEN is required");
 
     // 2. Initialize Turso DB Client
     let db = Database::open_remote(turso_url, turso_token)
@@ -58,10 +52,8 @@ async fn main() -> shuttle_axum::ShuttleAxum {
     let turso_db = db.connect().expect("Failed to open connection to Turso");
 
     // 3. Initialize Qdrant Client Configuration
-    let config = QdrantClientConfig::from_url(&qdrant_url)
-        .with_api_key(qdrant_api_key);
-    let qdrant_client = QdrantClient::new(Some(config))
-        .expect("Failed to initialize Qdrant client");
+    let config = QdrantClientConfig::from_url(&qdrant_url).with_api_key(qdrant_api_key);
+    let qdrant_client = QdrantClient::new(Some(config)).expect("Failed to initialize Qdrant client");
 
     // 4. Wrap everything in a Thread-Safe Shared State
     let shared_state = Arc::new(AppState {
@@ -74,6 +66,7 @@ async fn main() -> shuttle_axum::ShuttleAxum {
     let router = Router::new()
         .route("/health", get(health_check))
         .route("/api/optimize", post(optimize_contract))
+        .route("/api/admin/seed", post(seed_gaslite_pattern)) // WIRED UP
         .with_state(shared_state);
 
     Ok(router.into())
@@ -82,7 +75,7 @@ async fn main() -> shuttle_axum::ShuttleAxum {
 // --- Route Handlers ---
 
 async fn health_check() -> &'static str {
-    "Mantle Gas Optimizer Service is active!"
+    "Gaslite Engine is online and ready to optimize Mantle smart contracts."
 }
 
 async fn optimize_contract(
@@ -90,28 +83,22 @@ async fn optimize_contract(
     Json(payload): Json<OptimizeRequest>,
 ) -> Result<Json<OptimizeResponse>, (axum::http::StatusCode, String)> {
     
-    // STEP 1: Generate embeddings for user source code via DeepSeek or your embedding service
-    // For production, you will call an embedding model (e.g., text-embedding-3-small) here.
-    let code_embedding = match get_embedding(&payload.contract_source, &state.deepseek_api_key).await {
-        Ok(vec) => vec,
-        Err(e) => return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e)),
-    };
+    // TODO: Replace this dummy function call with a real call to an embedding API
+    // (e.g., DeepSeek embeddings or OpenAI text-embedding-3-small)
+    let code_embedding = get_mock_embedding(&payload.contract_source).await;
 
-    // STEP 2: Query Qdrant for matching optimization patterns
-    let collection_name = "mantle_gas_patterns";
     let search_result = state
         .qdrant_client
         .search_points(&SearchPoints {
-            collection_name: collection_name.to_string(),
+            collection_name: "gaslite_patterns".to_string(),
             vector: code_embedding,
-            limit: 3, // Retrieve top 3 matching patterns
+            limit: 3,
             with_payload: Some(true.into()),
             ..Default::default()
         })
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // STEP 3: Extract pattern IDs and fetch structural data/JSON metadata from Turso DB
     let mut pattern_contexts = Vec::new();
     let mut found_pattern_ids = Vec::new();
 
@@ -120,49 +107,91 @@ async fn optimize_contract(
             if let Some(pattern_id_str) = payload.as_str() {
                 found_pattern_ids.push(pattern_id_str.to_string());
 
-                // Query metadata from Turso (assuming you saved your structural JSON strings there indexed by ID)
-                let query = format!("SELECT json_data FROM optimization_patterns WHERE id = '{}'", pattern_id_str);
+                let query = format!("SELECT explanation, yul_optimized FROM optimization_patterns WHERE id = '{}'", pattern_id_str);
                 if let Ok(Some(row)) = state.turso_db.query(&query, ()).and_then(|mut r| r.next()) {
-                    if let Ok(raw_json) = row.get::<String>(0) {
-                        pattern_contexts.push(raw_json);
-                    }
+                    let expl = row.get::<String>(0).unwrap_or_default();
+                    let yul = row.get::<String>(1).unwrap_or_default();
+                    pattern_contexts.push(format!("Pattern: {}\nExplanation: {}\nCode:\n{}", pattern_id_str, expl, yul));
                 }
             }
         }
     }
 
-    // STEP 4: Build Context Injection for DeepSeek-V3 Inference
     let context_for_llm = pattern_contexts.join("\n---\n");
     
-    let deepseek_response = call_deepseek_v3(
-        &payload.contract_source,
-        &context_for_llm,
-        &state.deepseek_api_key
-    ).await
-    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+    let deepseek_response = call_deepseek_v3(&payload.contract_source, &context_for_llm, &state.deepseek_api_key)
+        .await
+        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
-    // STEP 5: Return calculated responses back to client
     Ok(Json(OptimizeResponse {
-        analysis: "DeepSeek-V3 gas assessment complete using target vector injection.".to_string(),
+        analysis: "Gaslite optimization complete.".to_string(),
         suggested_patterns: found_pattern_ids,
         optimized_code: deepseek_response,
     }))
 }
 
+async fn seed_gaslite_pattern(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SeedPatternPayload>,
+) -> Result<&'static str, (axum::http::StatusCode, String)> {
+    
+    let meta = &payload.metadata;
+    let id = meta["id"].as_str().ok_or((axum::http::StatusCode::BAD_REQUEST, "Missing ID".to_string()))?;
+    let category = meta["category"].as_str().unwrap_or("general");
+    let version = meta["version"].as_str().unwrap_or("1.0");
+    let title = meta["title"].as_str().unwrap_or("");
+    let source = meta["source"].as_str().unwrap_or("");
+    let source_file = meta["source_file"].as_str().unwrap_or("");
+    let difficulty = meta["difficulty"].as_str().unwrap_or("medium");
+    let mantle_specific = meta["mantle_specific"].as_bool().unwrap_or(false) as i32;
+    let evm_version = meta["evm_version"].as_str().unwrap_or("paris");
+    
+    let trigger_patterns = meta["trigger_patterns"].to_string();
+    let solidity_before = meta["solidity_before"].as_str().unwrap_or("");
+    let yul_optimized = meta["yul_optimized"].as_str().unwrap_or("");
+    let patterns_used = meta["patterns_used"].to_string();
+    let explanation = meta["explanation"].as_str().unwrap_or("");
+    let risk_level = meta["risk_level"].as_str().unwrap_or("low");
+    let when_to_apply = meta["when_to_apply"].as_str().unwrap_or("");
+    let when_not_to_apply = meta["when_not_to_apply"].as_str().unwrap_or("");
+
+    let sql = "INSERT OR REPLACE INTO optimization_patterns (id, category, version, title, source, source_file, difficulty, mantle_specific, evm_version, trigger_patterns, solidity_before, yul_optimized, patterns_used, explanation, risk_level, when_to_apply, when_not_to_apply) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)";
+    
+    state.turso_db.execute(sql, libsql::params![
+        id, category, version, title, source, source_file, difficulty, mantle_specific, evm_version,
+        trigger_patterns, solidity_before, yul_optimized, patterns_used, explanation, risk_level, when_to_apply, when_not_to_apply
+    ]).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Turso Error: {}", e)))?;
+
+    let mut points_payload = std::collections::HashMap::new();
+    points_payload.insert("pattern_id".to_string(), id.to_string().into());
+
+    let point_id = uuid::Uuid::new_v4().to_string(); 
+
+    state.qdrant_client.upsert_points(&UpsertPoints {
+        collection_name: "gaslite_patterns".to_string(),
+        points: vec![PointStruct::new(
+            point_id,
+            payload.vector,
+            points_payload.into()
+        )],
+        ..Default::default()
+    }).await.map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Qdrant Error: {}", e)))?;
+
+    Ok("Gaslite database tracking initialized successfully.")
+}
+
 // --- Downstream External API Helpers ---
 
-async fn get_embedding(text: &str, _api_key: &str) -> Result<Vec<f32>, String> {
-    // Dummy vector placeholder for testing. 
-    // Substitute this routine with your real text embedding generation API call.
-    Ok(vec![0.023, -0.432, 0.112, 0.984]) 
+async fn get_mock_embedding(_text: &str) -> Vec<f32> {
+    // Replace with real embedding call (e.g. text-embedding-3-small)
+    vec![0.023, -0.432, 0.112, 0.984] 
 }
 
 async fn call_deepseek_v3(source_code: &str, context: &str, api_key: &str) -> Result<String, String> {
     let client = reqwest::Client::new();
     
-    // Construct the structured prompt payload instructions targeting DeepSeek-V3 execution
     let prompt = format!(
-        "You are an elite EVM gas optimizer for Mantle chain.\n\
+        "You are Gaslite, an elite EVM gas optimizer for Mantle chain.\n\
          Analyze this user code and optimize it using the reference patterns provided.\n\n\
          ### Target User Code:\n{}\n\n\
          ### Reference Optimization Patterns (RAG Context):\n{}\n\n\
@@ -171,7 +200,7 @@ async fn call_deepseek_v3(source_code: &str, context: &str, api_key: &str) -> Re
     );
 
     let body = serde_json::json!({
-        "model": "deepseek-chat", // DeepSeek-V3 API Identifier
+        "model": "deepseek-chat", 
         "messages": [
             {"role": "system", "content": "You are a professional compiler and smart contract optimization architect."},
             {"role": "user", "content": prompt}
