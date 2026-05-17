@@ -1,0 +1,29 @@
+{
+  "id": "VARIABLE_REUSE",
+  "title": "Repurpose a Solidity variable after its original use to carry signals across assembly boundaries or reduce stack depth",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "variable no longer needed after assembly block",
+    "reuse parameter variable for derived value",
+    "reduce local variable count in assembly",
+    "stack depth optimization"
+  ],
+
+  "description": "YUL local variables consume stack slots. Reusing a variable whose original value is no longer needed avoids an extra stack slot and makes intent clear: 'this variable now means something else'. Commonly used to carry boolean flags out of assembly blocks into Solidity scope.",
+
+  "pattern_before": "uint256 expiry = ...; // used for timestamp check\nbool ecrecoverFailed;\nassembly {\n    ecrecoverFailed = iszero(returndatasize())\n}",
+
+  "pattern_after": "uint256 expiry = ...; // used for timestamp check, then repurposed\nassembly {\n    expiry := iszero(returndatasize()) // now means 'ecrecover failed'\n}\n// expiry now carries ecrecover failure signal",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "When a variable's lifecycle ends before a new signal is needed, and the semantic shift is documented",
+  "when_not_to_apply": "Security-critical code where variable reuse obscures auditing, when the original value might still be needed",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

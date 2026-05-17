@@ -1,0 +1,45 @@
+{
+  "id": "ERC20VOTES_CHECKPOINT_PUSH_DIFF",
+  "category": "storage",
+  "version": "1.0",
+  "title": "Packed checkpoint storage: key + length + value in single slot with sentinel address escape hatch",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20Votes.sol",
+  "difficulty": "hard",
+  "mantle_specific": true,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "checkpoint storage with timestamp and value",
+    "packed struct in single storage slot",
+    "voting checkpoint push",
+    "value too large for packed slot"
+  ],
+
+  "solidity_before": "struct Checkpoint {\n    uint48 key;\n    uint208 value;\n}\nCheckpoint[] checkpoints;\n// Each checkpoint = 2 storage slots minimum",
+
+  "yul_optimized": "// Single slot layout: [value(160 bits) | length(48 bits) | key(48 bits)]\n// If value >= address() sentinel, store value in not(slot) overflow slot\nassembly {\n    // Pack key + count + value into one slot\n    if iszero(or(eq(newValue, address()), shr(160, newValue))) {\n        sstore(checkpointSlot, or(or(key, shl(48, n)), shl(96, newValue)))\n        break\n    }\n    // Value too large for 160 bits — use sentinel + overflow slot\n    sstore(checkpointSlot, or(or(key, shl(48, n)), shl(96, address())))\n    sstore(not(checkpointSlot), newValue)\n}",
+
+  "patterns_used": [
+    "SENTINEL_ADDRESS_LARGE_VALUE",
+    "SLOT_NOT_OPERATOR",
+    "BIT_EXTRACTION_PACKED_SLOT",
+    "OVERFLOW_CHECK_LT"
+  ],
+
+  "explanation": "Instead of two slots per checkpoint (one for key, one for value), solady packs key(48 bits) + array length(48 bits) + value(160 bits) into a single uint256. For values > 160 bits, it uses address() as a sentinel marker in the packed slot and stores the full value at not(checkpointSlot) — the bitwise NOT of the slot address, which is a deterministic overflow location that doesn't collide with any keccak256 derived slot.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per checkpoint write (saves 1 SSTORE for most values)",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "high",
+  "when_to_apply": "Append-only checkpoint arrays where key fits in 48 bits and value usually fits in 160 bits",
+  "when_not_to_apply": "Mutable arrays, checkpoints where values regularly exceed 160 bits, any pattern requiring random access writes",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

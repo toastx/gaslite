@@ -1,0 +1,29 @@
+{
+  "id": "BIT_EXTRACTION_PACKED_SLOT",
+  "title": "Extract middle bits from packed uint256 using shl then shr",
+  "category": "bitwise",
+
+  "trigger_patterns": [
+    "extract value from packed slot",
+    "isolate middle bits of uint256",
+    "packed struct field access in assembly",
+    "shr shl combination for bit masking"
+  ],
+
+  "description": "To extract bits [high:low] from a uint256 without a mask: shl(256-high, value) shifts the target field to the top, then shr(256-high+low, result) shifts it down to position 0. Two shift opcodes instead of a shift + AND mask operation.",
+
+  "pattern_before": "// Using mask\nuint256 length = (packed >> 48) & 0xffffffffffff;",
+
+  "pattern_after": "// Using double shift — no mask constant needed\n// Extract bits [207:48] (the 'length' field)\nlet length := shr(208, shl(160, packed))\n// shl(160) shifts field to top, shr(208) = shr(160+48) shifts to position 0",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Extracting a contiguous field from a packed uint256 where the field is bounded on both sides",
+  "when_not_to_apply": "Extracting the lowest N bits (just use AND mask) or highest N bits (just use SHR)",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

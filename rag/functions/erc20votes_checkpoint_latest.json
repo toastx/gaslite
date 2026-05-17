@@ -1,0 +1,44 @@
+{
+  "id": "ERC20VOTES_CHECKPOINT_LATEST",
+  "category": "storage",
+  "version": "1.0",
+  "title": "Variable slot reuse — repurpose length variable as checkpoint slot to save a declaration",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20Votes.sol",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "read latest checkpoint value",
+    "getVotes latest lookup",
+    "single storage slot reuse in assembly"
+  ],
+
+  "solidity_before": "function getLatest(uint256 lengthSlot) internal view returns (uint256) {\n    uint256 length = checkpoints[lengthSlot].length;\n    if (length == 0) return 0;\n    uint256 checkpointSlot = lengthSlot + length - 1;\n    return checkpoints[checkpointSlot].value;\n}",
+
+  "yul_optimized": "assembly {\n    result := shr(208, shl(160, sload(lengthSlot)))\n    if result {\n        // Reuse lengthSlot variable as checkpointSlot — no new variable needed\n        lengthSlot := add(sub(result, 1), lengthSlot)\n        result := shr(96, sload(lengthSlot))\n        if eq(result, address()) { result := sload(not(lengthSlot)) }\n    }\n}",
+
+  "patterns_used": [
+    "VARIABLE_REUSE",
+    "BIT_EXTRACTION_PACKED_SLOT",
+    "SENTINEL_ADDRESS_LARGE_VALUE",
+    "SLOT_NOT_OPERATOR"
+  ],
+
+  "explanation": "lengthSlot is used first to load the packed slot (extracting length via bit shifting). Once length is extracted into result, lengthSlot is no longer needed in its original capacity — it gets overwritten with the derived checkpointSlot. This avoids an additional local variable declaration, reducing stack pressure slightly.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per getVotes call",
+  "gas_estimate": "low",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Assembly blocks where an input variable's purpose is fully consumed before a derived value is needed",
+  "when_not_to_apply": "When the original variable is still needed after the reuse point",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

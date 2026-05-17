@@ -1,0 +1,29 @@
+{
+  "id": "SENTINEL_ADDRESS_LARGE_VALUE",
+  "title": "Use address() as sentinel to signal value overflow into a separate not(slot) storage location",
+  "category": "storage",
+
+  "trigger_patterns": [
+    "value too large for packed slot",
+    "uint160 overflow in packed storage",
+    "checkpoint value exceeds bit width",
+    "dynamic size packed struct"
+  ],
+
+  "description": "When packing a value into fewer bits than uint256, values that exceed the bit width need special handling. Using address() (20 bytes = 160 bits) as a sentinel in the packed field signals that the real value is stored at not(slot) — the bitwise NOT of the slot, which is deterministic and never collides with keccak256-derived slots.",
+
+  "pattern_before": "// Two slots always — one for metadata, one for value\nsstore(metadataSlot, metadata)\nsstore(valueSlot, value)",
+
+  "pattern_after": "// One slot for small values, two for large\nif iszero(or(eq(value, address()), shr(160, value))) {\n    sstore(slot, or(metadata, shl(96, value)))\n} else {\n    sstore(slot, or(metadata, shl(96, address()))) // sentinel\n    sstore(not(slot), value) // overflow slot\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "high",
+
+  "when_to_apply": "Packed storage where values occasionally exceed the packed bit width but usually fit",
+  "when_not_to_apply": "Values that regularly exceed bit width (always two slots = simpler), mutable storage (not(slot) pattern is read-only friendly but complex to update)",
+
+  "risk_level": "high",
+  "mantle_specific": false,
+  "source": "solady"
+}

@@ -1,0 +1,29 @@
+{
+  "id": "SLOT_NOT_OPERATOR",
+  "title": "Use not(slot) as a deterministic overflow storage location that never collides with keccak256 slots",
+  "category": "storage",
+
+  "trigger_patterns": [
+    "secondary storage slot for same key",
+    "overflow value storage",
+    "paired slot pattern",
+    "sload not slot"
+  ],
+
+  "description": "keccak256 outputs are distributed in [0, 2^256) but practically never reach the top of the range. not(slot) = 2^256 - 1 - slot maps any keccak256 slot to the complementary address space, which is provably collision-free with any other keccak256-derived slot. Used by solady as a zero-cost secondary slot for overflow values.",
+
+  "pattern_before": "// Separate mapping for overflow — costs extra keccak256\nmapping(bytes32 => uint256) overflowValues;",
+
+  "pattern_after": "// Free secondary slot — no extra hash needed\nsstore(not(primarySlot), overflowValue)\n// Read back:\nlet val := sload(not(primarySlot))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "When a slot needs a paired secondary location for overflow or extended data",
+  "when_not_to_apply": "When primary slot is not keccak256-derived (could theoretically collide with low slot numbers)",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

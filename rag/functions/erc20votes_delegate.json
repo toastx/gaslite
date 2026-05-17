@@ -1,0 +1,42 @@
+{
+  "id": "ERC20VOTES_DELEGATE",
+  "category": "control_flow",
+  "version": "1.0",
+  "title": "log4 with zero-length data for fully-indexed 3-topic event",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20Votes.sol",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "event with three indexed address parameters",
+    "DelegateChanged event emission",
+    "all-indexed event no data",
+    "log4 opcode"
+  ],
+
+  "solidity_before": "emit DelegateChanged(account, from, delegatee);",
+
+  "yul_optimized": "assembly {\n    // log4 with 0 data bytes — all params are indexed topics\n    log4(0x00, 0x00, _DELEGATE_CHANGED_EVENT_SIGNATURE, shr(96, mload(0x0c)), from, to)\n}",
+
+  "patterns_used": [
+    "LOG4_ZERO_LENGTH"
+  ],
+
+  "explanation": "DelegateChanged has three indexed address parameters and no non-indexed data. Using log4(0x00, 0x00, ...) with zero length means no memory is read or allocated for the event data — the three indexed values go directly as topics. Solidity's emit would still allocate and encode the ABI data even when all fields are indexed.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per delegation",
+  "gas_estimate": "low",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Any event where all parameters are indexed — no non-indexed data to encode",
+  "when_not_to_apply": "Events with any non-indexed parameters",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

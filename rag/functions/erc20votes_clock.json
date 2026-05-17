@@ -1,0 +1,42 @@
+{
+  "id": "ERC20VOTES_CLOCK",
+  "category": "control_flow",
+  "version": "1.0",
+  "title": "Branch-less out-of-gas revert using returndatacopy for range validation",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20Votes.sol",
+  "difficulty": "hard",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "uint48 range check",
+    "block.number overflow guard",
+    "revert if value exceeds bit width",
+    "branch-less revert"
+  ],
+
+  "solidity_before": "function clock() public view virtual returns (uint48 result) {\n    if (block.number >= 2**48) revert();\n    return uint48(block.number);\n}",
+
+  "yul_optimized": "assembly {\n    result := number()\n    // Branch-less out-of-gas revert if block.number >= 2**48\n    returndatacopy(returndatasize(), returndatasize(), sub(0, shr(48, number())))\n}",
+
+  "patterns_used": [
+    "RETURNDATACOPY_OOG_REVERT"
+  ],
+
+  "explanation": "returndatacopy(dest, src, len) with len = sub(0, shr(48, number())): if block.number fits in 48 bits, shr(48, number()) = 0, sub(0, 0) = 0, len = 0, no-op. If block.number >= 2^48, shr(48, number()) >= 1, sub(0, 1) = type(uint256).max (wraps), returndatacopy tries to copy max uint256 bytes from empty returndata, causing an out-of-gas revert. No branch opcode needed — the copy itself is the conditional revert.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per call",
+  "gas_estimate": "low",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "medium",
+  "when_to_apply": "Any uint48/uint32/uint16 range check on block.number or timestamp where an if-revert would otherwise be needed",
+  "when_not_to_apply": "When the OOG behaviour needs to be distinguishable from other reverts, in view functions where gas is irrelevant",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

@@ -1,0 +1,29 @@
+{
+  "id": "LOG4_ZERO_LENGTH",
+  "title": "Emit fully-indexed events using log4 with zero data length — no memory allocation needed",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "event with three indexed parameters",
+    "all-indexed event emission",
+    "DelegateChanged style event",
+    "log4 opcode usage"
+  ],
+
+  "description": "When all event parameters are indexed, there is no ABI-encoded data to write. log4(0x00, 0x00, sig, topic1, topic2, topic3) with zero length reads nothing from memory, emitting only the 4 topics. Solidity's emit always encodes data even when empty.",
+
+  "pattern_before": "// Solidity allocates and encodes empty data\nemit DelegateChanged(account, from, to);",
+
+  "pattern_after": "// Zero memory operations — topics only\nlog4(0x00, 0x00, _DELEGATE_CHANGED_EVENT_SIGNATURE, account, from, to)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Events where every parameter is indexed (maximum 3 non-signature topics in EVM)",
+  "when_not_to_apply": "Events with any non-indexed data parameters",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

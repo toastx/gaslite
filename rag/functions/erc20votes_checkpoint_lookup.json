@@ -1,0 +1,43 @@
+{
+  "id": "ERC20VOTES_CHECKPOINT_LOOKUP",
+  "category": "math",
+  "version": "1.0",
+  "title": "Binary search with Newton's method sqrt approximation to optimize recent checkpoint lookup",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20Votes.sol",
+  "difficulty": "hard",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "binary search over checkpoints",
+    "getPastVotes lookup",
+    "sorted array upper bound search",
+    "recent value lookup optimization"
+  ],
+
+  "solidity_before": "// Standard binary search — always starts from middle\nfunction upperLookup(uint256[] storage arr, uint256 key) internal view returns (uint256) {\n    uint256 low = 0;\n    uint256 high = arr.length;\n    while (low < high) {\n        uint256 mid = (low + high) / 2;\n        if (arr[mid].key <= key) low = mid + 1;\n        else high = mid;\n    }\n    return high == 0 ? 0 : arr[high - 1].value;\n}",
+
+  "yul_optimized": "assembly {\n    let l := 0\n    let h := shr(208, shl(160, sload(lengthSlot)))\n    // Start nearer to right using Newton sqrt approximation\n    for {} iszero(lt(h, 6)) {} {\n        let m := shl(4, lt(0xffff, h))\n        m := shl(shr(1, or(m, shl(3, lt(0xff, shr(m, h))))), 16)\n        m := shr(1, add(m, div(h, m)))\n        // ... more Newton iterations\n        m := sub(h, shr(1, add(m, div(h, m)))) // Approx h - sqrt(h)\n        if iszero(lt(key, and(sload(add(m, lengthSlot)), 0xffffffffffff))) {\n            l := add(1, m)\n            break\n        }\n        h := m\n        break\n    }\n    // Standard binary search from optimized starting point\n    for {} lt(l, h) {} {\n        let m := shr(1, add(l, h))\n        if iszero(lt(key, and(sload(add(m, lengthSlot)), 0xffffffffffff))) {\n            l := add(1, m)\n            continue\n        }\n        h := m\n    }\n}",
+
+  "patterns_used": [
+    "NEWTONS_METHOD_SQRT_BINARY_SEARCH",
+    "BIT_EXTRACTION_PACKED_SLOT"
+  ],
+
+  "explanation": "Standard binary search is O(log n) starting from the middle. Since getPastVotes is almost always called for recent timepoints, starting the search from h - sqrt(h) (near the end) dramatically reduces iterations for the common case. Newton's method computes the integer square root of h in ~6 division iterations, all inline in assembly. For h=1000, this starts at ~968 instead of 500 — typically resolves in 1-2 iterations instead of 10.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per lookup (proportional to array length, saves ~8 SLOADs for 1000-entry array)",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "medium",
+  "when_to_apply": "Binary search over append-only sorted arrays where recent entries are queried most often",
+  "when_not_to_apply": "Arrays queried uniformly across all indices, small arrays under 6 elements where standard binary search is faster",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

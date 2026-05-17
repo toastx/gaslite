@@ -1,0 +1,43 @@
+{
+  "id": "ERC20VOTES_DELEGATE_BY_SIG",
+  "category": "control_flow",
+  "version": "1.0",
+  "title": "Variable reuse to smuggle ecrecover failure signal across assembly boundary",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC20Votes.sol",
+  "difficulty": "hard",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ecrecover result check",
+    "signature verification",
+    "staticcall to precompile 0x1",
+    "returndatasize check after ecrecover"
+  ],
+
+  "solidity_before": "address signer = ecrecover(hash, v, r, s);\nif (signer == address(0)) revert InvalidSignature();",
+
+  "yul_optimized": "assembly {\n    // staticcall ecrecover — returndatasize is 0x20 on success, 0x00 on failure\n    let t := staticcall(gas(), 1, 0x00, 0x80, 0x20, 0x20)\n    // Reuse `expiry` variable to carry ecrecover failure signal out of assembly\n    expiry := iszero(returndatasize())\n    // signer loaded from 0x20 where ecrecover wrote it\n    signer := mload(0x20)\n}\n// Back in Solidity — expiry now means 'ecrecover failed' not 'timestamp exceeded'\nif ((nonces(signer) ^ nonce) | expiry != 0) { revert(); }",
+
+  "patterns_used": [
+    "VARIABLE_REUSE",
+    "RETURNDATASIZE_SUCCESS_CHECK"
+  ],
+
+  "explanation": "After the assembly block, the Solidity variable expiry has already been used for its original purpose (timestamp check). Solady reuses it to carry the ecrecover failure flag (iszero(returndatasize())) back into Solidity scope without declaring a new variable. The final check combines nonce mismatch and ecrecover failure into one OR expression, saving a separate if-revert branch.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per sig verification",
+  "gas_estimate": "low",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "medium",
+  "when_to_apply": "EIP-712 signature verification where a Solidity variable is no longer needed after the assembly block",
+  "when_not_to_apply": "When variable reuse obscures intent in security-critical code that others must audit",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

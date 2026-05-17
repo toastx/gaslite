@@ -1,0 +1,29 @@
+{
+  "id": "RETURNDATACOPY_OOG_REVERT",
+  "title": "Branch-less out-of-gas revert using returndatacopy with computed length",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "uint48 or uint32 range guard",
+    "block.number overflow check",
+    "branch-less conditional revert",
+    "value exceeds N bits check"
+  ],
+
+  "description": "returndatacopy(0, 0, len) with len=0 is a no-op. With len=type(uint256).max it causes OOG. By computing len as sub(0, shr(N, value)), the length is 0 when value fits in N bits and wraps to max uint256 when it doesn't — achieving a conditional revert with zero branch opcodes.",
+
+  "pattern_before": "if (block.number >= type(uint48).max) revert();",
+
+  "pattern_after": "// No branch — the copy length itself is the condition\nreturndatacopy(returndatasize(), returndatasize(), sub(0, shr(48, number())))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Uint range guards where saving a JUMPI opcode matters, typically in frequently called view functions",
+  "when_not_to_apply": "When the revert reason needs to be distinguishable (OOG looks different to callers than a standard revert)",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

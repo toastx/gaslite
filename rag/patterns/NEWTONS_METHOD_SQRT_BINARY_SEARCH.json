@@ -1,0 +1,29 @@
+{
+  "id": "NEWTONS_METHOD_SQRT_BINARY_SEARCH",
+  "title": "Optimize binary search start point using Newton's method integer sqrt for recent-biased lookups",
+  "category": "math",
+
+  "trigger_patterns": [
+    "binary search over sorted array",
+    "checkpoint lookup optimization",
+    "getPastVotes recent bias",
+    "upper bound search in append-only array"
+  ],
+
+  "description": "Standard binary search starts at the midpoint. For append-only arrays queried mostly for recent values, starting at h - sqrt(h) is far more efficient. Newton's method computes isqrt(h) in ~6 inline division iterations. For a 1000-entry array, this jumps to index ~968 instead of 500, reducing iterations from ~10 to ~2 for recent queries.",
+
+  "pattern_before": "// Standard — always starts at middle\nuint256 mid = (low + high) / 2;",
+
+  "pattern_after": "// Newton sqrt approximation — starts near end for large arrays\nlet m := shl(4, lt(0xffff, h))\nm := shl(shr(1, or(m, shl(3, lt(0xff, shr(m, h))))), 16)\nm := shr(1, add(m, div(h, m)))\n// ... 5 more Newton iterations\nm := sub(h, shr(1, add(m, div(h, m)))) // h - sqrt(h)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "high",
+
+  "when_to_apply": "Binary search over append-only sorted arrays where the most recent entries are queried most frequently",
+  "when_not_to_apply": "Arrays queried uniformly, arrays smaller than 6 entries (overhead exceeds benefit), mutable arrays",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}
