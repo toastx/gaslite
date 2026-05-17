@@ -13,6 +13,7 @@ struct AppState {
     turso_db: libsql::Connection,
     qdrant_client: QdrantClient,
     deepseek_api_key: String,
+    kilo_api_key: String,
 }
 
 // --- Request/Response DTOs ---
@@ -45,6 +46,7 @@ async fn main(
     let qdrant_url = secrets.get("QDRANT_CLUSTER_URL").expect("QDRANT_CLUSTER_URL is required");
     let turso_url = secrets.get("TURSO_DATABASE_URL").expect("TURSO_DATABASE_URL is required");
     let turso_token = secrets.get("TURSO_AUTH_TOKEN").expect("TURSO_AUTH_TOKEN is required");
+    let kilo_api_key = secrets.get("KILO_API_KEY").expect("KILO_API_KEY is required");
 
     // 2. Initialize Turso DB Client
     let db = Database::open_remote(turso_url, turso_token)
@@ -60,6 +62,7 @@ async fn main(
         turso_db,
         qdrant_client,
         deepseek_api_key,
+        kilo_api_key,
     });
 
     // 5. Build router and register state
@@ -83,9 +86,7 @@ async fn optimize_contract(
     Json(payload): Json<OptimizeRequest>,
 ) -> Result<Json<OptimizeResponse>, (axum::http::StatusCode, String)> {
     
-    // TODO: Replace this dummy function call with a real call to an embedding API
-    // (e.g., DeepSeek embeddings or OpenAI text-embedding-3-small)
-    let code_embedding = get_mock_embedding(&payload.contract_source).await;
+    let code_embedding = get_embedding(&payload.contract_source, &state.kilo_api_key).await;
 
     let search_result = state
         .qdrant_client
@@ -182,9 +183,39 @@ async fn seed_gaslite_pattern(
 
 // --- Downstream External API Helpers ---
 
-async fn get_mock_embedding(_text: &str) -> Vec<f32> {
-    // Replace with real embedding call (e.g. text-embedding-3-small)
-    vec![0.023, -0.432, 0.112, 0.984] 
+async fn get_embedding(text: &str, api_key: &str) -> Result<Vec<f32>, String> {
+    let client = reqwest::Client::new();
+    
+    let api_url = "https://api.kilo.ai/api/gateway"; 
+    
+    let body = serde_json::json!({
+        "model": "text-embedding-3-small", 
+        "input": text
+    });
+
+    let res = client
+        .post(api_url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if res.status().is_success() {
+        let json_res: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        
+        // Extract the float array from the standard OpenAI JSON response structure
+        let embedding = json_res["data"][0]["embedding"]
+            .as_array()
+            .ok_or("Failed to parse embedding array from gateway response")?
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect::<Vec<f32>>();
+            
+        Ok(embedding)
+    } else {
+        Err(format!("Gateway API error: {}", res.status()))
+    }
 }
 
 async fn call_deepseek_v3(source_code: &str, context: &str, api_key: &str) -> Result<String, String> {
