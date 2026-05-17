@@ -39,16 +39,26 @@ struct TursoRequest {
 struct TursoStatement {
     #[serde(rename = "type")]
     stmt_type: String,
-    stmt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    args: Option<Vec<TursoArg>>,
+    stmt: Option<TursoStmtInner>, // Now points to an inner struct
 }
 
+#[derive(Serialize)]
+struct TursoStmtInner {
+    sql: String,
+    args: Vec<TursoArg>,
+}
+
+// Hrana requires args to look like {"type": "text", "value": "foo"}
+// This exact serde macro configuration achieves that automatically.
 #[derive(Serialize, Clone)]
-#[serde(untagged)]
+#[serde(tag = "type", content = "value")]
 enum TursoArg {
+    #[serde(rename = "text")]
     Text(String),
+    #[serde(rename = "integer")]
     Integer(i64),
+    #[serde(rename = "null")]
     Null,
 }
 
@@ -122,13 +132,14 @@ impl AppState {
         let stmts = vec![
             TursoStatement {
                 stmt_type: "execute".to_string(),
-                stmt: Some(sql.to_string()),
-                args: Some(args),
+                stmt: Some(TursoStmtInner {
+                    sql: sql.to_string(),
+                    args,
+                }),
             },
             TursoStatement {
                 stmt_type: "close".to_string(),
                 stmt: None,
-                args: None,
             },
         ];
 
@@ -168,13 +179,14 @@ impl AppState {
         let stmts = vec![
             TursoStatement {
                 stmt_type: "execute".to_string(),
-                stmt: Some(sql.to_string()),
-                args: Some(args),
+                stmt: Some(TursoStmtInner {
+                    sql: sql.to_string(),
+                    args,
+                }),
             },
             TursoStatement {
                 stmt_type: "close".to_string(),
                 stmt: None,
-                args: None,
             },
         ];
 
@@ -234,6 +246,9 @@ impl AppState {
 async fn main(
     #[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore,
 ) -> shuttle_axum::ShuttleAxum {
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let deepseek_api_key = secrets
         .get("DEEPSEEK_API_KEY")
         .expect("DEEPSEEK_API_KEY required");
