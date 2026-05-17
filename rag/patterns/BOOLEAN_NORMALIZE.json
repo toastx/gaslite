@@ -1,0 +1,29 @@
+{
+  "id": "BOOLEAN_NORMALIZE",
+  "title": "Normalize any non-zero value to exactly 1 using iszero(iszero(x))",
+  "category": "bitwise",
+
+  "trigger_patterns": [
+    "bool value from arbitrary uint",
+    "normalize boolean before sstore",
+    "isApproved normalization",
+    "convert uint to 0 or 1"
+  ],
+
+  "description": "iszero(x) returns 1 if x=0, else 0. iszero(iszero(x)) returns 0 if x=0, else 1. This cleans any non-zero uint256 to exactly 1 in two opcodes, critical when storing booleans in packed slots where a value of 2 would corrupt adjacent fields.",
+
+  "pattern_before": "// Risky — stores 2 if isApproved=2, corrupts packed slot\nsstore(slot, isApproved)",
+
+  "pattern_after": "// Safe — always stores exactly 0 or 1\nisApproved := iszero(iszero(isApproved))\nsstore(slot, isApproved)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any bool value coming from external input before storing in a packed slot",
+  "when_not_to_apply": "Values already known to be 0 or 1 from prior operations",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

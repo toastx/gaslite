@@ -1,0 +1,36 @@
+{
+  "id": "ERC1155_SAFE_BATCH_TRANSFER_FROM",
+  "category": "tokens",
+  "version": "1.0",
+  "title": "Optimized ERC1155 safeBatchTransferFrom with identity precompile batch copy",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC1155.sol",
+  "difficulty": "extreme",
+  "mantle_specific": true,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "ERC1155 safeBatchTransferFrom function",
+    "batch token transfer",
+    "onERC1155BatchReceived hook",
+    "array iteration transfer"
+  ],
+  "solidity_before": "function safeBatchTransferFrom(address from, address to, uint256[] calldata ids, uint256[] calldata amounts, bytes calldata data) public virtual {\n    // Length matching, approval checks, for-loop balance updates, batch event emission, and batch hook execution.\n}",
+  "yul_optimized": "assembly {\n    // Setup and balances update loop...\n    let m := mload(0x40)\n    mstore(m, 0x40)\n    let n := add(0x20, shl(5, mload(ids)))\n    let o := add(m, 0x40)\n    pop(staticcall(gas(), 4, ids, n, o, n)) // Memory copy using precompile 0x4\n}",
+  "patterns_used": [
+    "IDENTITY_PRECOMPILE_MEMORY_COPY",
+    "MASTER_SLOT_SEED_DERIVATION",
+    "BATCH_ARRAY_SHIFT_ITERATION"
+  ],
+  "explanation": "Iterates efficiently over two arrays simultaneously to update storage. The standout optimization is using `staticcall` to the identity precompile (address `0x04`) to copy the arrays into memory for event emission and external hook payload construction, bypassing expensive Yul loops.",
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per batch transfer",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+  "risk_level": "high",
+  "when_to_apply": "ERC1155 batch transfers where arrays are copied to memory",
+  "when_not_to_apply": "None",
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

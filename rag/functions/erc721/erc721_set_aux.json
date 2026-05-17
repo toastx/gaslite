@@ -1,0 +1,42 @@
+{
+  "id": "ERC721_SET_AUX",
+  "category": "storage",
+  "version": "1.0",
+  "title": "XOR field update — modify a specific bit field in packed uint256 without disturbing other fields",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC721.sol",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "update one field in packed storage slot",
+    "auxiliary data update without touching balance",
+    "bit field update in uint256",
+    "partial slot write"
+  ],
+
+  "solidity_before": "// Naive — must mask and rewrite entire slot\nuint256 packed = balanceSlot;\nuint224 aux = value;\nuint32 balance = uint32(packed);\nbalanceSlot = uint256(balance) | (uint256(aux) << 32);",
+
+  "yul_optimized": "assembly {\n    let balanceSlot := keccak256(0x0c, 0x1c)\n    let packed := sload(balanceSlot)\n    // XOR update: only flip bits that changed\n    sstore(balanceSlot, xor(packed, shl(32, xor(value, shr(32, packed)))))\n}",
+
+  "patterns_used": [
+    "XOR_FIELD_UPDATE"
+  ],
+
+  "explanation": "xor(value, shr(32, packed)) computes the diff between new and old aux value. shl(32, diff) positions the diff at the correct bit offset. xor(packed, positioned_diff) flips only the changed bits — lower 32 bits (balance) are untouched because the diff is zero there. One SLOAD, one XOR, one SSTORE. No masking constants needed.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per aux update",
+  "gas_estimate": "low",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Updating one field in a packed uint256 where other fields must be preserved",
+  "when_not_to_apply": "When the field being updated spans bits that overlap with other fields, or when the new value must be range-checked before writing",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

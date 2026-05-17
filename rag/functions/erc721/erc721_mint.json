@@ -1,0 +1,45 @@
+{
+  "id": "ERC721_MINT",
+  "category": "tokens",
+  "version": "1.0",
+  "title": "Optimized ERC721 mint with hitchhiked extraData, dual-error revert, and balance overflow check",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC721.sol",
+  "difficulty": "hard",
+  "mantle_specific": true,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC721 mint function",
+    "NFT token creation",
+    "first owner assignment",
+    "token already exists check"
+  ],
+
+  "solidity_before": "function _mint(address to, uint256 id) internal {\n    require(to != address(0));\n    require(ownerOf[id] == address(0), 'already exists');\n    ownerOf[id] = to;\n    balanceOf[to]++;\n    emit Transfer(address(0), to, id);\n}",
+
+  "yul_optimized": "assembly {\n    to := shr(96, shl(96, to))\n    mstore(0x00, id)\n    mstore(0x1c, _ERC721_MASTER_SLOT_SEED)\n    let ownershipSlot := add(id, add(id, keccak256(0x00, 0x20)))\n    let ownershipPacked := sload(ownershipSlot)\n    // Revert if token already exists\n    if shl(96, ownershipPacked) {\n        mstore(0x00, 0xc991cbb1) // TokenAlreadyExists()\n        revert(0x1c, 0x04)\n    }\n    // or() preserves extraData in upper 96 bits\n    sstore(ownershipSlot, or(ownershipPacked, to))\n    mstore(0x00, to)\n    let balanceSlot := keccak256(0x0c, 0x1c)\n    let balanceSlotPacked := add(sload(balanceSlot), 1)\n    // Dual-error: TransferToZeroAddress + AccountBalanceOverflow\n    if iszero(mul(to, and(balanceSlotPacked, _MAX_ACCOUNT_BALANCE))) {\n        mstore(shl(2, iszero(to)), 0xea553b3401336cea)\n        revert(0x1c, 0x04)\n    }\n    sstore(balanceSlot, balanceSlotPacked)\n    log4(codesize(), 0x00, _TRANSFER_EVENT_SIGNATURE, 0, to, id)\n}",
+
+  "patterns_used": [
+    "STORAGE_HITCHHIKING",
+    "DUAL_ERROR_PACKED_REVERT",
+    "CODESIZE_LOG4",
+    "ADJACENCY_SLOT"
+  ],
+
+  "explanation": "or(ownershipPacked, to) writes the new owner into the lower 160 bits while preserving any extraData already in the upper 96 bits — this is the hitchhiking technique. Balance overflow and zero address check combined into one condition using mul(to, and(packed, MAX_BALANCE)): if to=0 the mul is 0, if balance overflows the AND is 0.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per mint",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "medium",
+  "when_to_apply": "ERC721 mint where token IDs are not necessarily sequential",
+  "when_not_to_apply": "ERC721A style batch minting, tokens where extraData must be zero at mint time",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

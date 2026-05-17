@@ -1,0 +1,34 @@
+{
+  "id": "ERC1155_SET_APPROVAL_FOR_ALL",
+  "category": "tokens",
+  "version": "1.0",
+  "title": "Optimized ERC1155 setApprovalForAll with 0/1 boolean enforcement",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC1155.sol",
+  "difficulty": "low",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "ERC1155 setApprovalForAll",
+    "operator approval set",
+    "boolean storage clean"
+  ],
+  "solidity_before": "function setApprovalForAll(address operator, bool approved) public virtual {\n    isApprovedForAll[msg.sender][operator] = approved;\n    emit ApprovalForAll(msg.sender, operator, approved);\n}",
+  "yul_optimized": "assembly {\n    isApproved := iszero(iszero(isApproved))\n    mstore(0x20, _ERC1155_MASTER_SLOT_SEED)\n    mstore(0x14, caller())\n    mstore(0x00, operator)\n    sstore(keccak256(0x0c, 0x34), isApproved)\n    mstore(0x00, isApproved)\n    log3(0x00, 0x20, _APPROVAL_FOR_ALL_EVENT_SIGNATURE, caller(), shr(96, shl(96, operator)))\n}",
+  "patterns_used": [
+    "BOOLEAN_CLEANING_ISZERO",
+    "SCRATCH_SPACE_SLOT_HASH"
+  ],
+  "explanation": "Guarantees boolean storage is strictly 0 or 1 using `iszero(iszero())` to clean dirty bits. Directly computes the double mapping slot via memory concatenation and emits the `log3` event using the same scratch space.",
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per call",
+  "gas_estimate": "medium",
+  "benchmarked_via": "pending_forge_snapshot",
+  "risk_level": "low",
+  "when_to_apply": "Any mapping(address => mapping(address => bool)) approval update",
+  "when_not_to_apply": "N/A",
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

@@ -1,0 +1,43 @@
+{
+  "id": "ERC721_CHECK_RECEIVER",
+  "category": "calls",
+  "version": "1.0",
+  "title": "Use identity precompile (0x4) for cheap memory copy in ERC721 receiver check",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC721.sol",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "copy bytes memory to calldata buffer",
+    "memory copy in assembly",
+    "safeTransfer receiver callback",
+    "onERC721Received calldata preparation"
+  ],
+
+  "solidity_before": "// Solidity memory copy — loop or abi.encode overhead\nbytes memory callData = abi.encodeWithSelector(\n    IERC721Receiver.onERC721Received.selector,\n    msg.sender, from, id, data\n);",
+
+  "yul_optimized": "assembly {\n    let m := mload(0x40)\n    // ... build calldata in memory ...\n    let n := mload(data)\n    mstore(add(m, 0xa0), n)\n    // Identity precompile (0x4) copies n bytes from data to m+0xc0\n    if n { pop(staticcall(gas(), 4, add(data, 0x20), n, add(m, 0xc0), n)) }\n    // Call receiver\n    if iszero(call(gas(), to, 0, add(m, 0x1c), add(n, 0xa4), m, 0x20)) {\n        if returndatasize() {\n            returndatacopy(m, 0x00, returndatasize())\n            revert(m, returndatasize())\n        }\n    }\n}",
+
+  "patterns_used": [
+    "IDENTITY_PRECOMPILE_MEMORY_COPY",
+    "BUBBLE_UP_REVERT"
+  ],
+
+  "explanation": "The identity precompile at address 0x4 copies input bytes to output — it's a built-in memcpy. staticcall(gas(), 4, src, len, dst, len) copies `len` bytes from `src` to `dst`. This avoids writing a manual copy loop in assembly or paying Solidity's abi.encode overhead. The revert bubble-up pattern uses returndatacopy to forward the inner revert reason to the caller.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per safe transfer with data",
+  "gas_estimate": "medium",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Any assembly block that needs to copy a bytes memory variable to another memory location",
+  "when_not_to_apply": "Small fixed-size copies where a few mstore calls are cheaper than a precompile call overhead",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

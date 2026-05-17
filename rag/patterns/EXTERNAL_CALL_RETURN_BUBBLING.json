@@ -1,0 +1,21 @@
+{
+  "id": "EXTERNAL_CALL_RETURN_BUBBLING",
+  "category": "external_interactions",
+  "version": "1.0",
+  "title": "Efficient external call returndata bubbling",
+  "source": "solady",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "external call revert",
+    "bubble up revert",
+    "returndatacopy"
+  ],
+  "solidity_before": "(bool success, bytes memory data) = to.call(...);\nif (!success) {\n    if (data.length > 0) {\n        assembly { revert(add(data, 32), mload(data)) }\n    }\n    revert(\"Failed\");\n}",
+  "yul_optimized": "if iszero(call(gas(), to, 0, args_offset, args_size, ret_offset, ret_size)) {\n    if returndatasize() {\n        returndatacopy(m, 0x00, returndatasize())\n        revert(m, returndatasize())\n    }\n}",
+  "explanation": "Directly evaluates the boolean return from `call`. If `0` (revert), it immediately checks `returndatasize()`. If returndata exists, it copies it back to memory using `returndatacopy` and directly passes it to `revert()`, perfectly preserving the original error signature and message with zero overhead logic.",
+  "risk_level": "low",
+  "when_to_apply": "Any time an external hook or safe transfer callback is executed.",
+  "when_not_to_apply": "When you specifically need to catch and suppress the revert rather than bubbling it up to the user."
+}

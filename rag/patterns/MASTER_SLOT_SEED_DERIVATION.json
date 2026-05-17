@@ -1,0 +1,21 @@
+{
+  "id": "MASTER_SLOT_SEED_DERIVATION",
+  "category": "storage_layout",
+  "version": "1.0",
+  "title": "Master Slot Seed Bitwise OR packing for nested mappings",
+  "source": "solady",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "nested mapping slot",
+    "ERC1155 balance mapping",
+    "owner slot seed"
+  ],
+  "solidity_before": "uint256 slot = uint256(keccak256(abi.encode(owner, keccak256(abi.encode(id, mapping_slot)))));",
+  "yul_optimized": "let ownerSlotSeed := or(_ERC1155_MASTER_SLOT_SEED, shl(96, owner))\nmstore(0x20, ownerSlotSeed)\nmstore(0x00, id)\nlet balanceSlot := keccak256(0x00, 0x40)",
+  "explanation": "Instead of hashing multiple times to derive the nested mapping slot `mapping[id][owner]`, a pre-calculated `_ERC1155_MASTER_SLOT_SEED` is bitwise OR'd with the left-shifted owner address (`shl(96, owner)`). This combined payload is then hashed once alongside the token `id`. This saves significant gas by reducing memory expansion and eliminating a secondary `keccak256` execution.",
+  "risk_level": "medium",
+  "when_to_apply": "When optimizing multi-dimensional mappings like `balances[id][owner]` or `allowances[owner][spender]`.",
+  "when_not_to_apply": "If the base slot seed contains data in the upper 160 bits that would conflict with the address bitwise `or` operation."
+}

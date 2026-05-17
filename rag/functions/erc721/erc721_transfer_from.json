@@ -1,0 +1,47 @@
+{
+  "id": "ERC721_TRANSFER_FROM",
+  "category": "tokens",
+  "version": "1.0",
+  "title": "Optimized ERC721 transferFrom with storage hitchhiking, XOR owner swap, and dual-error packed revert",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC721.sol",
+  "difficulty": "hard",
+  "mantle_specific": true,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC721 transferFrom",
+    "NFT ownership transfer with approval check",
+    "token owner update in storage",
+    "balance decrement increment for NFT"
+  ],
+
+  "solidity_before": "function transferFrom(address from, address to, uint256 id) public {\n    require(ownerOf(id) == from, 'wrong owner');\n    require(msg.sender == from || isApprovedForAll(from, msg.sender) || getApproved(id) == msg.sender);\n    _approve(address(0), id);\n    balanceOf[from]--;\n    balanceOf[to]++;\n    ownerOf[id] = to;\n    emit Transfer(from, to, id);\n}",
+
+  "yul_optimized": "assembly {\n    let bitmaskAddress := shr(96, not(0))\n    from := and(bitmaskAddress, from)\n    to := and(bitmaskAddress, to)\n    mstore(0x00, id)\n    mstore(0x1c, or(_ERC721_MASTER_SLOT_SEED, caller()))\n    let ownershipSlot := add(id, add(id, keccak256(0x00, 0x20)))\n    let ownershipPacked := sload(ownershipSlot)\n    let owner := and(bitmaskAddress, ownershipPacked)\n    // Dual-error packed revert\n    if iszero(mul(owner, eq(owner, from))) {\n        mstore(shl(2, iszero(owner)), 0xceea21b6a1148100)\n        revert(0x1c, 0x04)\n    }\n    // XOR swap owner bits without touching extraData\n    sstore(ownershipSlot, xor(ownershipPacked, xor(from, to)))\n    // log4 with codesize() as zero-length pointer\n    log4(codesize(), 0x00, _TRANSFER_EVENT_SIGNATURE, from, to, id)\n}",
+
+  "patterns_used": [
+    "STORAGE_HITCHHIKING",
+    "XOR_OWNER_UPDATE",
+    "DUAL_ERROR_PACKED_REVERT",
+    "CODESIZE_LOG4",
+    "ADJACENCY_SLOT",
+    "BOOLEAN_NORMALIZE"
+  ],
+
+  "explanation": "Six techniques: (1) ownership slot derived as add(id, add(id, keccak256())) exploits EVM storage layout so adjacent token IDs have adjacent slots, (2) XOR swap replaces the owner address bits without touching upper 96 extraData bits — no masking needed, (3) two different error selectors packed in one uint256, offset by condition using shl(2, iszero(owner)), (4) log4(codesize(), 0x00) uses codesize as a valid but irrelevant pointer for zero-length data, (5) approved address stored at add(1, ownershipSlot) for free — no keccak256 needed.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per transfer",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "high",
+  "when_to_apply": "ERC721 transferFrom where ownership and extra data are packed in same slot",
+  "when_not_to_apply": "Contracts where extraData bits must survive independent of owner, ERC721A style consecutive minting",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

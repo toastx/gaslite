@@ -1,0 +1,29 @@
+{
+  "id": "XOR_FIELD_UPDATE",
+  "title": "Update a specific bit field in packed uint256 using XOR diff — no masking constants needed",
+  "category": "bitwise",
+
+  "trigger_patterns": [
+    "update one field in packed slot",
+    "partial packed uint256 write",
+    "bit field update without mask",
+    "auxiliary data update"
+  ],
+
+  "description": "To update field at bit offset N: compute diff = xor(newValue, oldField), shift to position = shl(N, diff), apply = xor(packed, shifted). Only bits that actually changed are flipped. No mask constant needed — the diff itself acts as a mask. Works for any field width.",
+
+  "pattern_before": "// Naive mask approach — needs mask constant\nuint256 mask = ~(uint256(type(uint224).max) << 32);\npacked = (packed & mask) | (uint256(value) << 32);",
+
+  "pattern_after": "// XOR diff approach — no mask constant\nlet packed := sload(balanceSlot)\nsstore(balanceSlot, xor(packed, shl(32, xor(value, shr(32, packed)))))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Updating a single field in a packed uint256 when the field offset is known at compile time",
+  "when_not_to_apply": "When the new value must be range-validated before writing, or when multiple fields change simultaneously",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

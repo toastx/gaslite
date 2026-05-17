@@ -1,0 +1,29 @@
+{
+  "id": "CODESIZE_LOG4",
+  "title": "Use codesize() as memory pointer for zero-length log4 — any valid pointer works",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "log4 with no data",
+    "all-indexed ERC721 Transfer event",
+    "zero length event data",
+    "log4 codesize pattern"
+  ],
+
+  "description": "log4(offset, 0, ...) with length=0 reads zero bytes from memory regardless of offset. codesize() returns the contract's bytecode size — a valid but meaningless memory pointer when length is 0. Marginally cheaper than loading a constant 0x00 in some contexts, and signals intent: this pointer is never dereferenced.",
+
+  "pattern_before": "log4(0x00, 0x00, _TRANSFER_EVENT_SIGNATURE, from, to, id)",
+
+  "pattern_after": "// codesize() == any valid uint, length 0 means offset is never read\nlog4(codesize(), 0x00, _TRANSFER_EVENT_SIGNATURE, from, to, id)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Zero-length log4 calls where all event data is in topics",
+  "when_not_to_apply": "Any log with non-zero length data",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

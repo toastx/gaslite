@@ -1,0 +1,29 @@
+{
+  "id": "DUAL_ERROR_PACKED_REVERT",
+  "title": "Pack two 4-byte error selectors in one uint256, select by condition using computed offset",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "two possible errors from one check",
+    "token does not exist or wrong owner",
+    "conditional error selector",
+    "branch-less error selection"
+  ],
+
+  "description": "Two 4-byte selectors packed into one uint256 constant. The revert offset is computed as shl(2, condition) — when condition=0 the offset is 0 (first selector at 0x1c), when condition=1 the offset is 4 (second selector at 0x18, landing at 0x1c after the 4-byte shift). Branch-less — no JUMPI needed to pick the error.",
+
+  "pattern_before": "if (owner == address(0)) revert TokenDoesNotExist();\nif (owner != from) revert TransferFromIncorrectOwner();",
+
+  "pattern_after": "// 0xceea21b6 = TokenDoesNotExist, 0xa1148100 = TransferFromIncorrectOwner\n// packed: [TokenDoesNotExist][TransferFromIncorrectOwner] in one uint256\nif iszero(mul(owner, eq(owner, from))) {\n    mstore(shl(2, iszero(owner)), 0xceea21b6a1148100)\n    revert(0x1c, 0x04)\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Two mutually exclusive error conditions that can be detected from the same values, where one condition implies the other is impossible",
+  "when_not_to_apply": "More than two possible errors, errors requiring parameters, when conditions are not mutually exclusive",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

@@ -1,0 +1,29 @@
+{
+  "id": "ADJACENCY_SLOT",
+  "title": "Store paired data at add(1, primarySlot) to avoid a second keccak256 derivation",
+  "category": "storage",
+
+  "trigger_patterns": [
+    "approval stored next to ownership",
+    "paired storage slots",
+    "secondary data for same key",
+    "add 1 to slot"
+  ],
+
+  "description": "keccak256-derived slots are distributed across the full uint256 range. Adding small constants (1, 2, 3...) to a derived slot gives collision-free adjacent slots — the probability of collision with any other keccak256 slot is negligible. Used by solady to store the approved address at add(1, ownershipSlot) without any additional hash.",
+
+  "pattern_before": "// Two separate mappings — two keccak256 calls\nmapping(uint256 => address) ownerOf;\nmapping(uint256 => address) getApproved;",
+
+  "pattern_after": "// Primary slot for owner, add(1, slot) for approved\nlet ownershipSlot := keccak256derived(id)\nlet owner := sload(ownershipSlot)\nlet approved := sload(add(1, ownershipSlot))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "When two pieces of data are always associated with the same key and accessed together",
+  "when_not_to_apply": "When the adjacent slot might collide with sequential storage variables (slot 0, 1, 2...) — only safe for keccak256-derived primary slots",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

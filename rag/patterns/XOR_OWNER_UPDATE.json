@@ -1,0 +1,29 @@
+{
+  "id": "XOR_OWNER_UPDATE",
+  "title": "Swap address bits in packed slot using XOR without masking upper bits",
+  "category": "bitwise",
+
+  "trigger_patterns": [
+    "update owner in packed slot",
+    "replace address in lower 160 bits",
+    "ownership transfer without touching metadata",
+    "partial packed slot update"
+  ],
+
+  "description": "xor(packed, xor(from, to)) flips exactly the bits that differ between from and to in the lower 160 bits. Since from and to are clean 160-bit addresses, their XOR only has bits set in the lower 160 positions — the upper 96 extraData bits are never touched. No masking constant needed.",
+
+  "pattern_before": "// Naive — must mask to preserve upper bits\nuint256 extraData = packed >> 160;\npacked = uint256(uint160(to)) | (extraData << 160);",
+
+  "pattern_after": "// XOR swap — upper bits untouched automatically\nsstore(ownershipSlot, xor(ownershipPacked, xor(from, to)))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Replacing an address in the lower 160 bits of a packed slot when upper bits must be preserved",
+  "when_not_to_apply": "When from or to might have dirty upper bits (always clean with shr(96, shl(96, addr)) first)",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

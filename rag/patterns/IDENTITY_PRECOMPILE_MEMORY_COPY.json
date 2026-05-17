@@ -1,0 +1,29 @@
+{
+  "id": "IDENTITY_PRECOMPILE_MEMORY_COPY",
+  "title": "Use identity precompile (address 0x4) as a cheap memcpy in assembly",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "copy bytes memory in assembly",
+    "memory to memory copy",
+    "dynamic bytes copy without loop",
+    "safeTransfer data forwarding"
+  ],
+
+  "description": "The EVM identity precompile at address 0x4 returns its input unchanged. staticcall(gas(), 4, src, len, dst, len) copies len bytes from src to dst — a free memcpy. Cheaper than a manual copy loop for medium-sized buffers (>32 bytes). The call overhead is ~700 gas base but each 32-byte word copied in a loop costs ~9 gas, so breakeven is around 80 bytes.",
+
+  "pattern_before": "// Manual copy loop\nfor (uint i = 0; i < data.length; i += 32) {\n    assembly { mstore(add(dst, i), mload(add(src, i))) }\n}",
+
+  "pattern_after": "// Identity precompile memcpy\nif n { pop(staticcall(gas(), 4, add(data, 0x20), n, dst, n)) }",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Copying dynamic bytes in assembly when length > ~80 bytes",
+  "when_not_to_apply": "Small fixed-size copies (≤64 bytes) where 1-2 mstore calls are cheaper than precompile call overhead",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}
