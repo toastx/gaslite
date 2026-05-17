@@ -57,7 +57,7 @@ enum TursoArg {
     #[serde(rename = "text")]
     Text(String),
     #[serde(rename = "integer")]
-    Integer(i64),
+    Integer(String),
     #[serde(rename = "null")]
     Null,
 }
@@ -499,7 +499,7 @@ async fn ingest_local_files(
             TursoArg::Text(meta["source"].as_str().unwrap_or("").to_string()),
             TursoArg::Text(meta["source_file"].as_str().unwrap_or("").to_string()),
             TursoArg::Text(meta["difficulty"].as_str().unwrap_or("medium").to_string()),
-            TursoArg::Integer(meta["mantle_specific"].as_bool().unwrap_or(false) as i64),
+            TursoArg::Integer((meta["mantle_specific"].as_bool().unwrap_or(false) as i64).to_string()),
             TursoArg::Text(meta["evm_version"].as_str().unwrap_or("paris").to_string()),
             TursoArg::Text(triggers),
             TursoArg::Text(meta["solidity_before"].as_str()
