@@ -1,0 +1,44 @@
+{
+  "id": "EFFICIENT_HASH_SHA2",
+  "category": "calls",
+  "version": "1.0",
+  "title": "SHA256 via precompile (address 0x2) with mload result and invalid() on failure",
+  "source": "solady",
+  "source_file": "solady/src/utils/EfficientHashLib.sol",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "sha256 hash in solidity",
+    "sha2 precompile call",
+    "bitcoin compatible hash",
+    "staticcall precompile 0x2"
+  ],
+
+  "solidity_before": "bytes32 result = sha256(abi.encodePacked(b));",
+
+  "yul_optimized": "assembly {\n    mstore(0x00, b)\n    // staticcall to precompile 0x2 (SHA256)\n    // output written to 0x01, length 0x20\n    result := mload(staticcall(gas(), 2, 0x00, 0x20, 0x01, 0x20))\n    // returndatasize() is 0x20 on success, 0x00 on failure\n    if iszero(returndatasize()) { invalid() }\n}",
+
+  "patterns_used": [
+    "SHA2_PRECOMPILE",
+    "MLOAD_STATICCALL_RESULT",
+    "INVALID_ON_PRECOMPILE_FAILURE"
+  ],
+
+  "explanation": "staticcall to address 0x2 runs SHA256. Output is written to 0x01 (overlaps scratch space). result := mload(staticcall(...)) works because staticcall returns 1 on success — mload(1) reads from memory offset 1 which is where the 32-byte output was written. On failure returndatasize() is 0, triggering invalid() which consumes all remaining gas (stronger than revert for unrecoverable precompile failures).",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per sha256 call",
+  "gas_estimate": "medium",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Any SHA256 computation — Bitcoin merkle proofs, cross-chain verification, EIP-712 with SHA256",
+  "when_not_to_apply": "When keccak256 is acceptable — SHA256 precompile costs ~60 gas base vs keccak256 opcode at 30 gas base",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

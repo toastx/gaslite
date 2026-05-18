@@ -1,0 +1,43 @@
+{
+  "id": "EFFICIENT_HASH_MALLOC",
+  "category": "memory",
+  "version": "1.0",
+  "title": "malloc() — allocate bytes32 buffer without zeroing memory, free() conditionally restores pointer",
+  "source": "solady",
+  "source_file": "solady/src/utils/EfficientHashLib.sol",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "allocate fixed size buffer in assembly",
+    "avoid memory zeroing on allocation",
+    "dynamic array allocation without zero init",
+    "stack too deep workaround with buffer"
+  ],
+
+  "solidity_before": "// Solidity always zeros new memory\nbytes32[] memory buffer = new bytes32[](10); // zeros 10 slots",
+
+  "yul_optimized": "// malloc — no zeroing, just bumps pointer\nassembly {\n    buffer := mload(0x40)          // buffer points to current free memory\n    mstore(buffer, n)              // store length\n    mstore(0x40, add(shl(5, add(1, n)), buffer)) // bump pointer by n*32 + 32\n}\n\n// free — restore pointer only if nothing allocated after buffer\nassembly {\n    let n := mload(buffer)\n    // condition: n>0 AND free pointer == buffer end\n    mstore(\n        shl(6, lt(iszero(n), eq(add(shl(5, add(1, n)), buffer), mload(0x40)))),\n        buffer\n    )\n}",
+
+  "patterns_used": [
+    "UNINITIALIZED_MALLOC",
+    "CONDITIONAL_FREE_POINTER_RESTORE"
+  ],
+
+  "explanation": "malloc skips Solidity's memory zeroing — caller is responsible for writing every slot before reading. free() uses a branchless trick: the mstore destination is either 0x40 (restoring the free pointer to buffer start) or 0x00 (a no-op write to scratch space). The condition shl(6, ...) produces either 64 (0x40) or 0 depending on whether the buffer is still at the top of memory.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per allocation (saves 32 gas per slot not zeroed)",
+  "gas_estimate": "medium",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "medium",
+  "when_to_apply": "Temporary buffers where all slots will be written before being read, stack-too-deep workarounds",
+  "when_not_to_apply": "Buffers returned to callers or passed to untrusted code — uninitialized memory may leak previous values",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

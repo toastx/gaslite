@@ -1,0 +1,42 @@
+{
+  "id": "EFFICIENT_HASH_SCRATCH",
+  "category": "memory",
+  "version": "1.0",
+  "title": "Hash 1-2 values using scratch space — no free pointer update needed",
+  "source": "solady",
+  "source_file": "solady/src/utils/EfficientHashLib.sol",
+  "difficulty": "low",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "keccak256 of one or two values",
+    "hash single bytes32 or uint256",
+    "abi.encode before keccak256",
+    "keccak256(abi.encode(a, b))"
+  ],
+
+  "solidity_before": "bytes32 h = keccak256(abi.encode(v0));\nbytes32 h2 = keccak256(abi.encode(v0, v1));",
+
+  "yul_optimized": "// Single value — scratch space\nassembly {\n    mstore(0x00, v0)\n    result := keccak256(0x00, 0x20)\n}\n\n// Two values — scratch space\nassembly {\n    mstore(0x00, v0)\n    mstore(0x20, v1)\n    result := keccak256(0x00, 0x40)\n}",
+
+  "patterns_used": [
+    "SCRATCH_SPACE_SLOT_HASH"
+  ],
+
+  "explanation": "abi.encode allocates new memory and updates the free pointer. For 1-2 values that fit in 64 bytes, writing directly to scratch space (0x00-0x3f) avoids all allocation overhead. The free pointer at 0x40 is never touched. For 3+ values, free pointer must be used since inputs exceed scratch space.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per hash call",
+  "gas_estimate": "low",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Any keccak256 of 1-2 fixed-size values where scratch space is not already in use",
+  "when_not_to_apply": "3+ values (exceeds scratch space), when scratch space is already used by outer assembly block",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

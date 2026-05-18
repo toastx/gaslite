@@ -1,0 +1,29 @@
+{
+  "id": "CALLDATACOPY_HASH",
+  "title": "Copy calldata slice to memory then hash — avoids abi.decode allocation",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "hash bytes calldata",
+    "keccak256 of calldata slice",
+    "hash function argument without decoding",
+    "calldatacopy before keccak256"
+  ],
+
+  "description": "abi.decode(data, (bytes)) allocates memory and copies. For hashing only, calldatacopy directly to free memory then keccak256 is cheaper — no ABI overhead, no length prefix handling, one copy instead of two.",
+
+  "pattern_before": "bytes32 h = keccak256(abi.encodePacked(data));",
+
+  "pattern_after": "assembly {\n    // clamp bounds branchlessly\n    let n := mul(gt(b.length, start), sub(b.length, start))\n    // copy calldata slice to free memory\n    calldatacopy(mload(0x40), add(b.offset, start), n)\n    result := keccak256(mload(0x40), n)\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Hashing bytes calldata when only the hash is needed, not the decoded value",
+  "when_not_to_apply": "When the bytes content also needs to be read or forwarded",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

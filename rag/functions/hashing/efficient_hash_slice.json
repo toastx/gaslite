@@ -1,0 +1,43 @@
+{
+  "id": "EFFICIENT_HASH_SLICE",
+  "category": "math",
+  "version": "1.0",
+  "title": "Branchless clamp for slice bounds — xor/mul pattern replaces min() without branching",
+  "source": "solady",
+  "source_file": "solady/src/utils/EfficientHashLib.sol",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "clamp index to array length",
+    "safe slice bounds without revert",
+    "min of two values without branch",
+    "start end bounds check for bytes slice"
+  ],
+
+  "solidity_before": "// Branch-based clamp\nif (end > b.length) end = b.length;\nif (start > b.length) start = b.length;",
+
+  "yul_optimized": "// Branchless clamp: result = (val < max) ? val : max\n// xor(val, mul(xor(val, max), lt(max, val)))\n// When val <= max: lt=0, mul=0, xor with 0 = val unchanged\n// When val > max:  lt=1, mul=xor(val,max), xor cancels to max\nassembly {\n    let n := mload(b)\n    end   := xor(end,   mul(xor(end,   n), lt(n, end)))\n    start := xor(start, mul(xor(start, n), lt(n, start)))\n    result := keccak256(add(add(b, 0x20), start), mul(gt(end, start), sub(end, start)))\n}",
+
+  "patterns_used": [
+    "BRANCHLESS_CLAMP",
+    "BRANCHLESS_MAX_LENGTH"
+  ],
+
+  "explanation": "xor(v, mul(xor(v, max), lt(max, v))) is a branch-free min(v, max). When v <= max, lt returns 0, mul returns 0, outer xor returns v unchanged. When v > max, lt returns 1, mul returns xor(v, max), outer xor cancels to max. The final mul(gt(end, start), sub(end, start)) also branchlessly returns 0 if start >= end, making the keccak256 length zero.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per slice operation",
+  "gas_estimate": "low",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Any bounds clamping where a JUMPI can be replaced — array index clamping, slice bounds, pagination limits",
+  "when_not_to_apply": "When out-of-bounds should revert rather than clamp silently",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

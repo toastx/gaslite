@@ -1,0 +1,29 @@
+{
+  "id": "BRANCHLESS_CLAMP",
+  "title": "Clamp value to maximum using xor/mul — branch-free min(value, max)",
+  "category": "math",
+
+  "trigger_patterns": [
+    "clamp index to length",
+    "min of two uint256 values",
+    "safe array bounds without revert",
+    "pagination limit enforcement"
+  ],
+
+  "description": "xor(v, mul(xor(v, max), lt(max, v))) computes min(v, max) without a JUMPI. When v <= max: lt=0, mul=0, result=v. When v > max: lt=1, mul=xor(v,max), outer xor cancels to max. Three opcodes (XOR, MUL, LT) replace a conditional branch.",
+
+  "pattern_before": "if (index > length) index = length;",
+
+  "pattern_after": "// Branchless min(index, length)\nindex := xor(index, mul(xor(index, length), lt(length, index)))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any min(a, b) computation where both values are uint256 and silent clamping is acceptable",
+  "when_not_to_apply": "When out-of-bounds should revert, when one value is signed",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

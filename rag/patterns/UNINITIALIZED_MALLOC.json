@@ -1,0 +1,29 @@
+{
+  "id": "UNINITIALIZED_MALLOC",
+  "title": "Allocate memory buffer without zeroing — bump free pointer, skip MSTORE initialization",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "temporary buffer allocation",
+    "avoid memory zeroing",
+    "stack too deep buffer workaround",
+    "dynamic array without initialization"
+  ],
+
+  "description": "Solidity's new T[](n) zeroes every slot before returning. For temporary buffers where every slot will be written before read, zeroing is wasted work. Manual allocation just bumps the free pointer: buffer = mload(0x40); mstore(0x40, buffer + 32*(n+1)). Caller must write all slots.",
+
+  "pattern_before": "// Solidity zeros n*32 bytes\nbytes32[] memory buf = new bytes32[](n);",
+
+  "pattern_after": "// No zeroing — just pointer bump\nassembly {\n    buffer := mload(0x40)\n    mstore(buffer, n)\n    mstore(0x40, add(shl(5, add(1, n)), buffer))\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Temporary scratch buffers where all n slots are written before being read or returned",
+  "when_not_to_apply": "Buffers returned externally, partially written buffers, any case where uninitialized values could be read",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

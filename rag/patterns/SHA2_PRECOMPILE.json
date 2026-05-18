@@ -1,0 +1,29 @@
+{
+  "id": "SHA2_PRECOMPILE",
+  "title": "Call SHA256 precompile (0x2) directly via staticcall — cheaper than Solidity sha256()",
+  "category": "calls",
+
+  "trigger_patterns": [
+    "sha256 computation",
+    "sha2 hash in assembly",
+    "bitcoin merkle proof hash",
+    "precompile address 2"
+  ],
+
+  "description": "The SHA256 precompile at address 0x2 accepts input bytes and returns 32 bytes. staticcall(gas(), 2, inputOffset, inputLen, outputOffset, 32) runs it. Writing output to 0x01 and using mload(staticcall(...)) reads result in one step since staticcall returns 1 on success. invalid() on failure burns all gas — appropriate for precompile failures which should never happen.",
+
+  "pattern_before": "bytes32 h = sha256(abi.encodePacked(data));",
+
+  "pattern_after": "assembly {\n    // write input to scratch\n    mstore(0x00, data)\n    // call SHA256 precompile, output at 0x01\n    result := mload(staticcall(gas(), 2, 0x00, 0x20, 0x01, 0x20))\n    if iszero(returndatasize()) { invalid() }\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "SHA256 computations — cross-chain proofs, Bitcoin compatibility, any non-keccak hashing need",
+  "when_not_to_apply": "When keccak256 suffices — SHA256 base cost ~60 gas vs keccak256 ~30 gas",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}
