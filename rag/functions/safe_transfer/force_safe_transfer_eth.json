@@ -1,0 +1,34 @@
+{
+  "id": "SAFETRANSFERLIB_FORCE_SAFE_TRANSFER_ETH",
+  "category": "transfers",
+  "version": "1.0",
+  "title": "Force ETH transfers bypassing reverting receive() hooks",
+  "source": "solady",
+  "source_file": "solady/src/utils/SafeTransferLib.sol",
+  "difficulty": "extreme",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "force send ETH",
+    "bypass receive revert",
+    "selfdestruct push"
+  ],
+  "solidity_before": "(bool success, ) = to.call{value: amount}(\"\");\nrequire(success, \"ETHTransferFailed\"); // Fails if 'to' is a contract that reverts.",
+  "yul_optimized": "assembly {\n    if lt(selfbalance(), amount) {\n        mstore(0x00, 0xb12d13eb) // `ETHTransferFailed()`.\n        revert(0x1c, 0x04)\n    }\n    if iszero(call(gasStipend, to, amount, codesize(), 0x00, codesize(), 0x00)) {\n        mstore(0x00, to)\n        mstore8(0x0b, 0x73)\n        mstore8(0x20, 0xff)\n        if iszero(create(amount, 0x0b, 0x16)) { revert(codesize(), codesize()) }\n    }\n}",
+  "patterns_used": [
+    "FORCE_ETH_VIA_SELFDESTRUCT",
+    "DYNAMIC_BYTECODE_GENERATION"
+  ],
+  "explanation": "Attempts a standard ETH call with a defined gas stipend. If the target contract reverts (DoS attempt or disabled `receive` function), it falls back to deploying a temporary 22-byte contract using `create`. This mini-contract instantly executes `SELFDESTRUCT(to)`, forcefully pushing the ETH into the target address, bypassing all EVM fallback execution rules.",
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per failed call",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+  "risk_level": "high",
+  "when_to_apply": "Distributing native ETH to unknown addresses, performing protocol airdrops, or processing withdrawals where malicious receivers might try to DoS the transaction.",
+  "when_not_to_apply": "On rollups or EVM networks where `SELFDESTRUCT` (EIP-6780) is heavily modified or completely disabled without SENDALL support.",
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

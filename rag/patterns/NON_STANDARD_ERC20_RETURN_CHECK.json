@@ -1,0 +1,22 @@
+{
+  "id": "NON_STANDARD_ERC20_RETURN_CHECK",
+  "category": "external_interactions",
+  "version": "1.0",
+  "title": "Universal ERC20 return data verification (Standard + Missing Returns)",
+  "source": "solady",
+  "difficulty": "high",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "ERC20 safe transfer",
+    "missing return value",
+    "USDT compatibility",
+    "extcodesize check"
+  ],
+  "solidity_before": "require(success && (data.length == 0 || abi.decode(data, (bool))));",
+  "yul_optimized": "if iszero(and(eq(mload(0x00), 1), success)) {\n    if iszero(lt(or(iszero(extcodesize(token)), returndatasize()), success)) {\n        mstore(0x00, 0x7939f424) // `TransferFromFailed()`\n        revert(0x1c, 0x04)\n    }\n}",
+  "explanation": "This block safely evaluates ERC20 interactions across all implementations. First, it checks the standard: did the call succeed and return `1` (`true`)? If not, it falls back to checking non-standard implementations: it verifies that `returndatasize()` is exactly 0 (handling tokens like USDT) and crucially guarantees that `extcodesize(token)` is greater than 0, preventing the EVM from silently returning success on empty EOA addresses.",
+  "risk_level": "medium",
+  "when_to_apply": "Building low-level token interactions (Vaults, DEXs, Bridges) that cannot trust the implementation standards of the deployed ERC20s.",
+  "when_not_to_apply": "N/A"
+}

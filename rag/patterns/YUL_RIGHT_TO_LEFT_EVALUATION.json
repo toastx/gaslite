@@ -1,0 +1,21 @@
+{
+  "id": "YUL_RIGHT_TO_LEFT_EVALUATION",
+  "category": "compiler_mechanics",
+  "version": "1.0",
+  "title": "Exploiting Yul right-to-left function argument evaluation",
+  "source": "solady",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "right to left evaluation",
+    "inline call checking",
+    "and(gt(), call())"
+  ],
+  "solidity_before": "bool success = token.staticcall(...);\nbool valid = success && data.length >= 32;",
+  "yul_optimized": "if iszero(and(gt(returndatasize(), 0x1f), staticcall(gas(), token, 0x1c, 0x24, 0x60, 0x20))) { revert() }",
+  "explanation": "In Yul, function arguments are evaluated from right to left. By placing the `staticcall` as the rightmost argument inside an `and()` check, the EVM executes the external call first. Once the call completes, the left argument `gt(returndatasize(), 0x1f)` evaluates the size of the return data resulting from that exact call. This collapses multiple assignments and variable allocations into a single, highly efficient stack operation.",
+  "risk_level": "low",
+  "when_to_apply": "Chaining execution state outcomes (like `call` success) with subsequent post-state checks (like `returndatasize()`).",
+  "when_not_to_apply": "When the right-side evaluation modifies state that the left-side evaluation relies on in a complex or unpredictable way."
+}

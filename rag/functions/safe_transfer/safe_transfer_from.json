@@ -1,0 +1,36 @@
+{
+  "id": "SAFETRANSFERLIB_SAFE_TRANSFER_FROM",
+  "category": "transfers",
+  "version": "1.0",
+  "title": "Optimized safeTransferFrom with non-standard ERC20 support and EOA checks",
+  "source": "solady",
+  "source_file": "solady/src/utils/SafeTransferLib.sol",
+  "difficulty": "high",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "safeTransferFrom",
+    "ERC20 transferFrom",
+    "handle missing return data",
+    "USDT transfer support"
+  ],
+  "solidity_before": "(bool success, bytes memory data) = token.call(abi.encodeWithSelector(IERC20.transferFrom.selector, from, to, amount));\nrequire(success && (data.length == 0 || abi.decode(data, (bool))), \"TransferFromFailed\");",
+  "yul_optimized": "assembly {\n    let m := mload(0x40)\n    mstore(0x60, amount)\n    mstore(0x40, to)\n    mstore(0x2c, shl(96, from))\n    mstore(0x0c, 0x23b872dd000000000000000000000000)\n    let success := call(gas(), token, 0, 0x1c, 0x64, 0x00, 0x20)\n    if iszero(and(eq(mload(0x00), 1), success)) {\n        if iszero(lt(or(iszero(extcodesize(token)), returndatasize()), success)) {\n            mstore(0x00, 0x7939f424)\n            revert(0x1c, 0x04)\n        }\n    }\n    mstore(0x60, 0)\n    mstore(0x40, m)\n}",
+  "patterns_used": [
+    "NON_STANDARD_ERC20_RETURN_CHECK",
+    "SCRATCH_SPACE_CALLDATA_CONSTRUCTION",
+    "EXTCODESIZE_SILENT_SUCCESS_PREVENTION"
+  ],
+  "explanation": "Constructs the `transferFrom` calldata tightly in memory. Executes the call and handles non-standard ERC20s (like USDT, which returns no data) by checking if `returndatasize()` is 0. Critically, it also checks `extcodesize` to prevent silent successes if the `token` address is an EOA (Externally Owned Account) rather than a contract.",
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per call",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+  "risk_level": "medium",
+  "when_to_apply": "Any time a contract needs to pull tokens from a user while supporting weird ERC20 tokens.",
+  "when_not_to_apply": "If the protocol strictly whitelists only standard-compliant ERC20 tokens.",
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

@@ -1,0 +1,22 @@
+{
+  "id": "FORCE_ETH_VIA_SELFDESTRUCT",
+  "category": "contract_deployment",
+  "version": "1.0",
+  "title": "Bypass receive() reverts by dynamically deploying a SELFDESTRUCT envelope",
+  "source": "solady",
+  "difficulty": "extreme",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "force ETH",
+    "push ETH",
+    "deploy selfdestruct contract",
+    "mstore8 0x73"
+  ],
+  "solidity_before": "No Solidity equivalent; requires deploying a separate mock contract and calling it.",
+  "yul_optimized": "mstore(0x00, to)\nmstore8(0x0b, 0x73) // PUSH20\nmstore8(0x20, 0xff) // SELFDESTRUCT\ncreate(amount, 0x0b, 0x16)",
+  "explanation": "Constructs exactly 22 bytes of EVM initialization bytecode in memory. `0x73` is the opcode for `PUSH20`. It pushes the 20-byte target `to` address onto the stack. `0xff` is the opcode for `SELFDESTRUCT`. By calling `create` with the `amount` of ETH as the endowment, the EVM spins up the contract, immediately runs the init code (which self-destructs), and forces the ETH to the target address without triggering any fallback functions.",
+  "risk_level": "high",
+  "when_to_apply": "Preventing Denial-of-Service (DoS) attacks in withdrawal queues, auctions, or royalty payouts.",
+  "when_not_to_apply": "If the destination requires state changes (like updating an internal ledger) upon receiving ETH."
+}
