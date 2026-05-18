@@ -1,0 +1,29 @@
+{
+  "id": "FALLBACK_SLOT_READ",
+  "title": "Read fallback/default slot by reusing already-mstored seed — no extra memory write needed",
+  "category": "storage",
+
+  "trigger_patterns": [
+    "per-token override with global default fallback",
+    "token specific config falling back to default",
+    "two tier storage lookup",
+    "royalty info per token or default"
+  ],
+
+  "description": "When per-token data is zero (not set), fall back to a global default. If the global default slot is a constant already written to memory for the per-token lookup, sload(mload(offset)) reads it without an extra mstore. The seed is already in memory from the keccak256 call — reuse it directly.",
+
+  "pattern_before": "// Two separate reads\naddress receiver = tokenRoyalties[tokenId].receiver;\nif (receiver == address(0)) {\n    receiver = defaultRoyalty.receiver; // second storage read\n}",
+
+  "pattern_after": "assembly {\n    mstore(0x00, tokenId)\n    mstore(0x20, _ERC2981_MASTER_SLOT_SEED)  // seed now at 0x20\n    let packed := sload(keccak256(0x00, 0x40)) // per-token slot\n    receiver := shr(96, packed)\n    if iszero(receiver) {\n        // seed still at 0x20 — sload the constant slot directly\n        packed := sload(mload(0x20))\n        receiver := shr(96, packed)\n    }\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Two-tier storage patterns where the fallback slot address is a constant already in memory",
+  "when_not_to_apply": "When fallback slot requires its own computation, or when per-token data is almost always set",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

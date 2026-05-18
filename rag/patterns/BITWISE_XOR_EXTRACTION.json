@@ -1,0 +1,24 @@
+{
+  "id": "BITWISE_XOR_EXTRACTION",
+  "category": "bit_manipulation",
+  "version": "1.0",
+  "title": "Bitwise XOR value isolation from packed slot configuration",
+  "source": "solady",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "extract from packed slot",
+    "isolate low bits",
+    "unpack storage values"
+  ],
+  "solidity_before": "uint256 feeNumerator = packedStorage & 0xFFFFFFFFFFFFFFFFFFFFFFFF;",
+  "yul_optimized": "let feeNumerator := xor(packed, shl(96, receiver))",
+  "explanation": "When an address and a smaller integer value are packed tightly into a single 256-bit storage slot, developers traditionally extract the integer using a standard bitmask constraint. However, if the address has already been extracted via right shifting (`shr(96, packed)`), executing an `xor` operation against the left-shifted address (`shl(96, receiver)`) cancels out the matching upper bits entirely, yielding the remaining lower bits directly. This saves gas by replacing expensive bitmask constants with quick register operations.",
+  "risk_level": "low",
+  "when_to_apply": "Unpacking a lower-bit integer field from a storage layout word where the upper-bit address has already been extracted into memory.",
+  "when_not_to_apply": "When the upper bits have not yet been explicitly isolated or if dirty data bits exist within the address variable range.",
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

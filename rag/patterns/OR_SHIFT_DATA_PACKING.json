@@ -1,0 +1,24 @@
+{
+  "id": "OR_SHIFT_DATA_PACKING",
+  "category": "storage_layout",
+  "version": "1.0",
+  "title": "Tightly packing storage slots using left shifts and bitwise OR",
+  "source": "solady",
+  "difficulty": "low",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "pack address and uint96",
+    "store values together",
+    "compress storage slot"
+  ],
+  "solidity_before": "defaultRoyaltyInfo.receiver = receiver;\ndefaultRoyaltyInfo.feeNumerator = feeNumerator;",
+  "yul_optimized": "let packed := or(shl(96, receiver), feeNumerator)\nsstore(slot, packed)",
+  "explanation": "Consolidates multiple independent state updates into a single atomic storage write operation (`sstore`). By shifting a clean 160-bit address left by 96 bits, the lower 96 bits are completely zeroed out. Performing a bitwise `or` with an unshifted integer bound to 96 bits seamlessly nests both properties into a single 32-byte layout with zero extraction overlap or padding overhead.",
+  "risk_level": "low",
+  "when_to_apply": "Whenever an address configuration parameters set fits structurally alongside variable properties inside a single 32-byte threshold limit.",
+  "when_not_to_apply": "If the trailing parameter range exceeds the remaining byte room available inside the targeted storage slot configuration.",
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

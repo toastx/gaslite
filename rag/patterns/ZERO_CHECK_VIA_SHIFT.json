@@ -1,0 +1,29 @@
+{
+  "id": "ZERO_CHECK_VIA_SHIFT",
+  "title": "Combine zero address check with left-shift packing — one operation serves two purposes",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "check receiver is not zero address",
+    "pack address into upper bits and validate",
+    "shl 96 address with iszero check",
+    "zero address guard before storage write"
+  ],
+
+  "description": "shl(96, receiver) shifts the address into the upper 160 bits for packing. If receiver is address(0), shl(96, 0) = 0. A single iszero(packed) check catches both cases: zero address AND confirms the shift succeeded. No separate address validation needed — the packing operation itself is the validation.",
+
+  "pattern_before": "require(receiver != address(0), 'zero receiver');\nuint256 packed = (uint256(receiver) << 96) | feeNumerator;",
+
+  "pattern_after": "let packed := shl(96, receiver)\n// If receiver == address(0), packed == 0 — one check covers both\nif iszero(packed) {\n    mstore(0x00, 0xb4457eaa) // RoyaltyReceiverIsZeroAddress()\n    revert(0x1c, 0x04)\n}\nsstore(slot, or(packed, feeNumerator))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any function that packs an address into upper bits and must reject the zero address",
+  "when_not_to_apply": "When address needs to stay in lower 160 bits, or when zero address is a valid input",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

@@ -1,0 +1,29 @@
+{
+  "id": "CLEAN_UPPER_BITS",
+  "title": "Mask value to N bits using shr(256-N, shl(256-N, value)) — no mask constant needed",
+  "category": "bitwise",
+
+  "trigger_patterns": [
+    "uint96 input validation",
+    "truncate value to specific bit width",
+    "clean dirty upper bits of smaller uint",
+    "feeNumerator bit masking"
+  ],
+
+  "description": "shl(256-N, value) shifts the value left so only the lowest N bits survive (upper bits are lost). shr(256-N, result) shifts back to position 0. Result is value masked to exactly N bits. No mask constant like 0xffffffffffff needed — the shift pair acts as the mask.",
+
+  "pattern_before": "// Mask constant approach\nuint96 cleaned = feeNumerator & type(uint96).max;",
+
+  "pattern_after": "// Double shift — no mask constant\n// For uint96: 256-96=160\nfeeNumerator := shr(160, shl(160, feeNumerator))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Cleaning dirty upper bits of any value that should fit in N bits, especially function parameters that may have dirty bits from ABI decoding",
+  "when_not_to_apply": "When the value is already known clean from prior operations",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

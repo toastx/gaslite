@@ -1,0 +1,35 @@
+{
+  "id": "ERC2981_ROYALTY_INFO",
+  "category": "royalties",
+  "version": "1.0",
+  "title": "Optimized ERC2981 royaltyInfo with fallback storage slots and packed slot extraction",
+  "source": "solady",
+  "source_file": "solady/src/tokens/ERC2981.sol",
+  "difficulty": "high",
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "trigger_patterns": [
+    "ERC2981 royaltyInfo function",
+    "token royalty lookup",
+    "fallback default royalty"
+  ],
+  "solidity_before": "function royaltyInfo(uint256 tokenId, uint256 salePrice) public view virtual returns (address receiver, uint256 royaltyAmount) {\n    RoyaltyInfo memory info = _tokenRoyaltyInfo[tokenId];\n    if (info.receiver == address(0)) {\n        info = _defaultRoyaltyInfo;\n    }\n    return (info.receiver, (salePrice * info.feeNumerator) / _feeDenominator());\n}",
+  "yul_optimized": "assembly {\n    mstore(0x00, tokenId)\n    mstore(0x20, _ERC2981_MASTER_SLOT_SEED)\n    let packed := sload(keccak256(0x00, 0x40))\n    receiver := shr(96, packed)\n    if iszero(receiver) {\n        packed := sload(mload(0x20))\n        receiver := shr(96, packed)\n    }\n    let x := salePrice\n    let y := xor(packed, shl(96, receiver))\n    returndatacopy(returndatasize(), returndatasize(), mul(y, gt(x, div(not(0), y))))\n    royaltyAmount := div(mul(x, y), feeDenominator)\n}",
+  "patterns_used": [
+    "SCRATCH_SPACE_SLOT_HASH",
+    "BITWISE_XOR_EXTRACTION",
+    "RETURNDATACOPY_OOG_REVERT"
+  ],
+  "explanation": "First executes an optimized storage lookup for a specific tokenId royalty. If the upper 160 bits (the receiver address) are zero, it fallbacks to loading the master slot seed value using memory caching `mload(0x20)`. The token fee numerator is pulled seamlessly via XOR extraction to avoid clean bitmask masking.",
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per call",
+  "gas_estimate": "low",
+  "benchmarked_via": "pending_forge_snapshot",
+  "risk_level": "low",
+  "when_to_apply": "Standard NFT marketplaces querying royalty pricing constraints.",
+  "when_not_to_apply": "When custom tier-based royalty logic relies on external dynamic contract hooks.",
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}
