@@ -1,3 +1,6 @@
+//TODO erc1155
+
+
 use axum::{
     extract::State,
     routing::{get, post},
@@ -331,6 +334,7 @@ async fn main(
         .route("/health", get(health_check))
         .route("/api/optimize", post(optimize_contract))
         .route("/api/admin/ingest-local", post(ingest_local_files))
+        .route("/api/admin/qdrant/reset", post(reset_collection))
         .with_state(state);
 
     Ok(router.into())
@@ -419,6 +423,25 @@ async fn optimize_contract(
     }))
 }
 
+async fn reset_collection(
+    State(state): State<Arc<AppState>>,
+) -> Result<&'static str, (axum::http::StatusCode, String)> {
+    state.qdrant
+        .delete_collection(COLLECTION)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    state.qdrant
+        .create_collection(
+            CreateCollectionBuilder::new(COLLECTION)
+                .vectors_config(VectorParamsBuilder::new(VECTOR_DIM, Distance::Cosine)),
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok("Collection reset successfully")
+}
+
 async fn ingest_local_files(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<IngestLocalRequest>,
@@ -474,9 +497,18 @@ async fn ingest_local_files(
             .or(meta["description"].as_str()).unwrap_or("");
         let triggers    = meta["trigger_patterns"].to_string();
         let when_apply  = meta["when_to_apply"].as_str().unwrap_or("");
+        let solidity_before = meta["solidity_before"].as_str()
+            .or(meta["pattern_before"].as_str())
+            .unwrap_or("");
+        let yul_optimized = meta["yul_optimized"].as_str()
+            .or(meta["pattern_after"].as_str())
+            .unwrap_or("");
+        let category = meta["category"].as_str().unwrap_or("");
 
         let embed_text = format!(
-            "Title: {title}\nTriggers: {triggers}\nExplanation: {explanation}\nWhen to apply: {when_apply}"
+            "Title: {title}\nCategory: {category}\nTriggers: {triggers}\n\
+             Explanation: {explanation}\nWhen to apply: {when_apply}\n\
+             Solidity pattern: {solidity_before}\nOptimized: {yul_optimized}"
         );
 
         // get embedding
