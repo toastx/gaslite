@@ -1,0 +1,29 @@
+{
+  "id": "SCRATCH_SPACE_CALLDATA_CONSTRUCTION",
+  "title": "Build external call calldata directly in scratch/free memory without abi.encode",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "manual calldata construction in assembly",
+    "mstore function selector and arguments",
+    "call with hand-built calldata",
+    "avoid abi.encodeWithSelector"
+  ],
+
+  "description": "Instead of using abi.encodeWithSelector which allocates new memory and encodes arguments with padding, this pattern writes the 4-byte function selector and arguments directly into known memory positions. The selector is written with alignment to 0x1c so that call(gas(), target, 0, 0x1c, 0x64, ...) sends exactly the right calldata bytes. Saves memory allocation, free pointer update, and ABI encoding gas.",
+
+  "pattern_before": "bytes memory callData = abi.encodeWithSelector(\n    IERC20.transferFrom.selector, from, to, amount\n);\n(bool success, ) = token.call(callData);",
+
+  "pattern_after": "mstore(0x60, amount)\nmstore(0x40, to)\nmstore(0x2c, shl(96, from))\nmstore(0x0c, 0x23b872dd000000000000000000000000) // transferFrom selector\ncall(gas(), token, 0, 0x1c, 0x64, 0x00, 0x20)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "high",
+
+  "when_to_apply": "Any external call where the function signature and argument types are known at compile time",
+  "when_not_to_apply": "Dynamic-length arguments (bytes, string, arrays) that require ABI offset encoding",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

@@ -1,0 +1,29 @@
+{
+  "id": "CONDITIONAL_FREE_POINTER_RESTORE",
+  "title": "Branchlessly restore the free memory pointer using computed mstore destination",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "branchless free pointer restore",
+    "conditional mstore destination",
+    "shl(6, condition) for 0x40",
+    "free memory pointer cleanup"
+  ],
+
+  "description": "To conditionally restore the free memory pointer without a branch: compute the mstore destination as either 0x40 (the free pointer location) or 0x00 (scratch space, a no-op write). shl(6, condition) produces 64 (0x40) when condition=1, and 0 when condition=0. The condition checks whether the buffer is still at the top of allocated memory (safe to reclaim). This avoids a JUMPI opcode.",
+
+  "pattern_before": "// Branch-based free\nif (buffer is at top of memory) {\n    mstore(0x40, buffer) // restore free pointer\n}",
+
+  "pattern_after": "// Branchless — writes to 0x40 or 0x00 based on condition\nlet n := mload(buffer)\nmstore(\n    shl(6, lt(iszero(n), eq(add(shl(5, add(1, n)), buffer), mload(0x40)))),\n    buffer\n)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Temporary buffer deallocation in assembly where memory may or may not have been allocated after the buffer",
+  "when_not_to_apply": "When the buffer is always the last allocation (unconditional restore is simpler)",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

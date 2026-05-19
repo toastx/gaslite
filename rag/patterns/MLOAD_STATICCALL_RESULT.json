@@ -1,0 +1,29 @@
+{
+  "id": "MLOAD_STATICCALL_RESULT",
+  "title": "Combine staticcall and result loading using mload(staticcall(...)) trick",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "mload(staticcall(...))",
+    "inline precompile result",
+    "combined call and load",
+    "SHA256 result trick"
+  ],
+
+  "description": "staticcall returns 1 on success, 0 on failure. By writing the output to memory offset 0x01 and using result := mload(staticcall(...)), you get mload(1) on success — which reads from offset 0x01 where the precompile just wrote the result. This combines the call and result extraction into one expression, saving a local variable assignment.",
+
+  "pattern_before": "let success := staticcall(gas(), 2, 0x00, 0x20, 0x00, 0x20)\nlet result := mload(0x00)",
+
+  "pattern_after": "// Output written to 0x01; staticcall returns 1 on success → mload(1) reads from 0x01\nresult := mload(staticcall(gas(), 2, 0x00, 0x20, 0x01, 0x20))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Precompile calls with 32-byte output where the success return value (1) can double as the output memory offset",
+  "when_not_to_apply": "Regular contract calls where the output position doesn't happen to be 0x01, or when you need to check for failure separately",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

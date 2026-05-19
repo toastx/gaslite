@@ -16,7 +16,7 @@
   "solidity_before": "function setApprovalForAll(address operator, bool approved) public virtual {\n    isApprovedForAll[msg.sender][operator] = approved;\n    emit ApprovalForAll(msg.sender, operator, approved);\n}",
   "yul_optimized": "assembly {\n    isApproved := iszero(iszero(isApproved))\n    mstore(0x20, _ERC1155_MASTER_SLOT_SEED)\n    mstore(0x14, caller())\n    mstore(0x00, operator)\n    sstore(keccak256(0x0c, 0x34), isApproved)\n    mstore(0x00, isApproved)\n    log3(0x00, 0x20, _APPROVAL_FOR_ALL_EVENT_SIGNATURE, caller(), shr(96, shl(96, operator)))\n}",
   "patterns_used": [
-    "BOOLEAN_CLEANING_ISZERO",
+    "BOOLEAN_NORMALIZE",
     "SCRATCH_SPACE_SLOT_HASH"
   ],
   "explanation": "Guarantees boolean storage is strictly 0 or 1 using `iszero(iszero())` to clean dirty bits. Directly computes the double mapping slot via memory concatenation and emits the `log3` event using the same scratch space.",

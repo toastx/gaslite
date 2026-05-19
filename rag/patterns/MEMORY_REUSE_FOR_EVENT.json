@@ -1,0 +1,29 @@
+{
+  "id": "MEMORY_REUSE_FOR_EVENT",
+  "title": "Reuse memory written for slot computation as event topic source",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "log3 topic from existing memory",
+    "shr(96, mload(0x0c)) for event topic",
+    "reuse mstore data for log emission",
+    "avoid duplicate mstore for event"
+  ],
+
+  "description": "After computing a storage slot by writing address and seed to scratch space, the same memory region already contains the data needed for log topics. For example, shr(96, mload(0x0c)) extracts the address from bytes 0x0c-0x2b where it was written for the keccak256 — no additional mstore needed for the event. This eliminates redundant memory writes.",
+
+  "pattern_before": "// Separate mstore for event topic\nmstore(0x00, owner)\nlet slot := keccak256(0x0c, 0x20)\n// ... must re-derive owner for log ...\nmstore(0x00, owner)\nlog3(0x00, 0x20, sig, caller(), owner)",
+
+  "pattern_after": "// Reuse memory — owner is already at 0x0c from slot computation\nsstore(keccak256(0x0c, 0x34), amount)\nmstore(0x00, amount)\nlog3(0x00, 0x20, _APPROVAL_EVENT_SIGNATURE, caller(), shr(96, mload(0x2c)))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any assembly block where slot computation and event emission use the same address — approve, transfer, mint",
+  "when_not_to_apply": "When memory has been overwritten between slot computation and event emission",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

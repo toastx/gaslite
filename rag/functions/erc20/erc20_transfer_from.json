@@ -29,7 +29,7 @@
     "LOG3_INLINE_EMIT"
   ],
 
-  "explanation": "Key optimizations: (1) shl(96, from) packs the address into upper bits, reused across multiple slot computations saving repeated mstore calls, (2) if not(allowance_) checks for max uint256 in one opcode skipping the decrement entirely for infinite allowances, (3) allowance and balance slots both derived using the packed from_ avoiding redundant address operations, (4) Permit2 infinite allowance short-circuits the entire allowance check path.",
+  "explanation": "Key optimizations: (1) shl(96, from) packs the address into upper bits, reused across multiple slot computations saving repeated mstore calls, (2) if not(allowance_) checks for max uint256 in one opcode skipping the decrement entirely for infinite allowances, (3) allowance and balance slots both derived using the packed from_ avoiding redundant address operations. Note: the actual Solady source has two code paths — the Permit2-enabled branch additionally checks eq(caller(), _PERMIT2) to skip the allowance check entirely. The YUL shown here represents the non-Permit2 branch logic.",
 
   "gas_saved_mantle": null,
   "gas_saved_l1": null,

@@ -1,0 +1,29 @@
+{
+  "id": "INVALID_ON_PRECOMPILE_FAILURE",
+  "title": "Use invalid() opcode for unrecoverable precompile failures to consume all gas",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "invalid() opcode",
+    "precompile failure handling",
+    "consume all remaining gas",
+    "unrecoverable error"
+  ],
+
+  "description": "The invalid() opcode (0xfe) consumes all remaining gas and reverts. Used after precompile failures because: (1) precompile failure is an exceptional condition that should never happen in normal operation, (2) consuming all gas prevents the caller from catching the error in a try/catch and proceeding with incorrect data, (3) it's cheaper than writing and reverting with a custom error for a path that should be unreachable.",
+
+  "pattern_before": "let success := staticcall(gas(), 2, ...)\nif iszero(success) {\n    mstore(0x00, 0xdeadbeef)\n    revert(0x1c, 0x04)\n}",
+
+  "pattern_after": "if iszero(returndatasize()) { invalid() }",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Precompile call failures (SHA256, ecrecover, identity) where the failure is considered a critical, unrecoverable error",
+  "when_not_to_apply": "User-facing errors where the revert reason matters, or when partial gas refund is desired",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

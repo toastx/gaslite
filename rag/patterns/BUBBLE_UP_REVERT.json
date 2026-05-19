@@ -1,0 +1,29 @@
+{
+  "id": "BUBBLE_UP_REVERT",
+  "title": "Forward inner call revert reason to caller using returndatacopy",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "bubble up revert reason",
+    "returndatacopy for revert",
+    "forward revert from sub-call",
+    "propagate error message"
+  ],
+
+  "description": "When an external call reverts, the revert reason is available via returndatacopy. This pattern copies the full returndata into memory and re-reverts with it, preserving the original error selector and parameters. Without this, the caller would only see a generic revert without context.",
+
+  "pattern_before": "// Solidity try/catch or require(success) loses inner revert reason\n(bool success, ) = target.call(data);\nrequire(success, \"call failed\");",
+
+  "pattern_after": "if iszero(call(gas(), to, 0, m, len, m, 0x20)) {\n    if returndatasize() {\n        returndatacopy(m, 0x00, returndatasize())\n        revert(m, returndatasize())\n    }\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any external call where the inner revert reason should be visible to the end user",
+  "when_not_to_apply": "When you want to replace the inner revert with a custom error regardless of what the callee returned",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

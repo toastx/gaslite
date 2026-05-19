@@ -1,0 +1,29 @@
+{
+  "id": "BRANCHLESS_MAX_LENGTH",
+  "title": "Compute safe slice length as mul(gt(end, start), sub(end, start)) — zero when start >= end",
+  "category": "math",
+
+  "trigger_patterns": [
+    "safe slice length",
+    "zero length when inverted bounds",
+    "branchless max(0, end - start)",
+    "clamp length to zero"
+  ],
+
+  "description": "When computing a slice length from start and end indices, sub(end, start) would underflow if start > end. mul(gt(end, start), sub(end, start)) returns 0 when start >= end (since gt returns 0, mul by 0 = 0) and the correct length when end > start. This avoids a branch while preventing underflow.",
+
+  "pattern_before": "uint256 len;\nif (end > start) len = end - start;\nelse len = 0;",
+
+  "pattern_after": "let len := mul(gt(end, start), sub(end, start))",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any length computation from two indices where the result should be 0 rather than revert when bounds are inverted",
+  "when_not_to_apply": "When inverted bounds should cause a revert rather than silently returning zero",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

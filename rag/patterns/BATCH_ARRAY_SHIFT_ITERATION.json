@@ -1,0 +1,29 @@
+{
+  "id": "BATCH_ARRAY_SHIFT_ITERATION",
+  "title": "Iterate over calldata arrays using pointer arithmetic with shift-based offset computation",
+  "category": "loops",
+
+  "trigger_patterns": [
+    "iterate calldata array in assembly",
+    "batch loop over ids and amounts",
+    "shl(5, index) for array offset",
+    "parallel array iteration"
+  ],
+
+  "description": "Instead of using Solidity's array indexing (which adds bounds checks and ABI decoding per element), this pattern iterates directly over calldata using pointer arithmetic. shl(5, i) computes i * 32 for the offset into the array. Two parallel arrays (ids and amounts) are traversed simultaneously using the same computed offset, loading elements with calldataload.",
+
+  "pattern_before": "for (uint256 i = 0; i < ids.length; i++) {\n    uint256 id = ids[i];  // bounds check + ABI decode\n    uint256 amount = amounts[i];  // bounds check + ABI decode\n}",
+
+  "pattern_after": "let n := ids.length\nfor { let i := 0 } lt(i, n) { i := add(i, 1) } {\n    let o := shl(5, i)\n    let id := calldataload(add(ids.offset, o))\n    let amount := calldataload(add(amounts.offset, o))\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Batch operations iterating over calldata arrays of fixed-size elements",
+  "when_not_to_apply": "Arrays of dynamic-size elements, memory arrays that need ABI decoding",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

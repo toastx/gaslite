@@ -1,0 +1,29 @@
+{
+  "id": "RETURNDATASIZE_SUCCESS_CHECK",
+  "title": "Use returndatasize() to verify precompile or ecrecover call success",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "returndatasize after staticcall",
+    "ecrecover success check",
+    "precompile return validation",
+    "iszero(returndatasize()) failure"
+  ],
+
+  "description": "After a staticcall to ecrecover (precompile 0x1) or other precompiles, returndatasize() is 0x20 (32 bytes) on success and 0x00 on failure. This provides a cheaper success check than inspecting the return value of staticcall itself, and can be combined with other conditions using iszero() for compact error handling.",
+
+  "pattern_before": "let success := staticcall(gas(), 1, 0x00, 0x80, 0x20, 0x20)\nif iszero(success) { revert(0, 0) }",
+
+  "pattern_after": "let t := staticcall(gas(), 1, 0x00, 0x80, 0x20, 0x20)\n// returndatasize is 0x20 on success, 0x00 on failure\nexpiry := iszero(returndatasize()) // reuse variable to carry failure signal",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "After staticcall to precompiles (ecrecover, SHA256, identity) where returndatasize indicates success",
+  "when_not_to_apply": "Regular contract calls where returndatasize varies based on function return type",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

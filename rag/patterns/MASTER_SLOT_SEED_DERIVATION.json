@@ -1,21 +1,29 @@
 {
   "id": "MASTER_SLOT_SEED_DERIVATION",
-  "category": "storage_layout",
-  "version": "1.0",
-  "title": "Master Slot Seed Bitwise OR packing for nested mappings",
-  "source": "solady",
-  "difficulty": "medium",
-  "mantle_specific": false,
-  "evm_version": "paris",
+  "title": "Derive multiple related storage slots from a single master seed constant",
+  "category": "storage",
+
   "trigger_patterns": [
-    "nested mapping slot",
-    "ERC1155 balance mapping",
-    "owner slot seed"
+    "master slot seed",
+    "ERC721 or ERC1155 slot seed",
+    "single constant for multiple slots",
+    "or(seed, address) for slot mixing"
   ],
-  "solidity_before": "uint256 slot = uint256(keccak256(abi.encode(owner, keccak256(abi.encode(id, mapping_slot)))));",
-  "yul_optimized": "let ownerSlotSeed := or(_ERC1155_MASTER_SLOT_SEED, shl(96, owner))\nmstore(0x20, ownerSlotSeed)\nmstore(0x00, id)\nlet balanceSlot := keccak256(0x00, 0x40)",
-  "explanation": "Instead of hashing multiple times to derive the nested mapping slot `mapping[id][owner]`, a pre-calculated `_ERC1155_MASTER_SLOT_SEED` is bitwise OR'd with the left-shifted owner address (`shl(96, owner)`). This combined payload is then hashed once alongside the token `id`. This saves significant gas by reducing memory expansion and eliminating a secondary `keccak256` execution.",
-  "risk_level": "medium",
-  "when_to_apply": "When optimizing multi-dimensional mappings like `balances[id][owner]` or `allowances[owner][spender]`.",
-  "when_not_to_apply": "If the base slot seed contains data in the upper 160 bits that would conflict with the address bitwise `or` operation."
+
+  "description": "A single master slot seed constant is used to derive ownership slots, balance slots, approval slots, and operator slots. The seed is combined with addresses using or() at specific memory offsets, and different hash lengths (0x1c, 0x20, 0x30, 0x34) select different slot families. This eliminates the need for multiple separate mapping slot constants and ensures all slots are derived from one auditable constant.",
+
+  "pattern_before": "// Multiple separate seeds/slot numbers\nuint256 constant OWNERSHIP_SLOT = 0;\nuint256 constant BALANCE_SLOT = 1;\nuint256 constant APPROVAL_SLOT = 2;\nuint256 constant OPERATOR_SLOT = 3;",
+
+  "pattern_after": "// One seed, multiple slot families via different hash ranges\nuint256 constant _MASTER_SLOT_SEED = 0x7d8825530a5a2e7a << 192;\n// Ownership: keccak256(id || seed) with add(id, add(id, hash))\n// Balance:   keccak256(0x0c..0x2b) using owner || seed\n// Approval:  keccak256(0x0c..0x3b) using owner || or(seed, operator)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Token contracts with multiple related mappings (owner, balance, approval, operator) that should share a unified storage namespace",
+  "when_not_to_apply": "Simple contracts with a single mapping, or contracts where independent slot constants improve auditability",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
 }

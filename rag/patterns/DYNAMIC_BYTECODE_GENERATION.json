@@ -1,0 +1,29 @@
+{
+  "id": "DYNAMIC_BYTECODE_GENERATION",
+  "title": "Construct EVM bytecode in memory at runtime for single-use contract deployment",
+  "category": "contract_deployment",
+
+  "trigger_patterns": [
+    "create with inline bytecode",
+    "mstore8 opcodes in memory",
+    "deploy single-use contract",
+    "runtime bytecode construction"
+  ],
+
+  "description": "Constructs minimal EVM bytecode directly in memory using mstore/mstore8, then deploys it with create(). The bytecode is assembled byte-by-byte: mstore8(offset, 0x73) writes the PUSH20 opcode, the target address is already in memory from a previous mstore, and mstore8(offset, 0xff) writes SELFDESTRUCT. The result is a 22-byte init code that executes immediately upon deployment. No Solidity contract compilation needed.",
+
+  "pattern_before": "// Requires a separate Solidity contract\ncontract Destructor {\n    constructor(address to) payable { selfdestruct(payable(to)); }\n}\nnew Destructor{value: amount}(to);",
+
+  "pattern_after": "mstore(0x00, to)\nmstore8(0x0b, 0x73) // PUSH20 opcode\nmstore8(0x20, 0xff) // SELFDESTRUCT opcode\ncreate(amount, 0x0b, 0x16) // deploy 22-byte contract",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "high",
+
+  "when_to_apply": "Single-use contracts like force-send ETH or CREATE2 address mining",
+  "when_not_to_apply": "Contracts that need to persist beyond the deployment transaction",
+
+  "risk_level": "high",
+  "mantle_specific": false,
+  "source": "solady"
+}

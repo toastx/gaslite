@@ -1,0 +1,29 @@
+{
+  "id": "SLOT_SEED_PACKING",
+  "title": "Overlap address bytes with slot seed at specific memory offsets for collision-free slot derivation",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "mapping slot with address key",
+    "overlapping memory layout for keccak256",
+    "slot seed at 0x0c offset",
+    "packed address and seed in scratch space"
+  ],
+
+  "description": "A 20-byte address is written at 0x00 and a 4-byte slot seed is written at 0x0c, overlapping the last 8 bytes of the zero-padded address. keccak256(0x0c, 0x20) then hashes the 12 bytes of the address tail plus the 4-byte seed plus 16 bytes of the next word — producing a unique slot per address without needing a full abi.encode. This is distinct from basic scratch space usage: the key insight is the overlapping write positions that pack two values into fewer bytes.",
+
+  "pattern_before": "// Standard mapping slot\nbytes32 slot = keccak256(abi.encode(owner, uint256(SLOT_NUMBER)));",
+
+  "pattern_after": "// Overlapping seed packing — 20-byte address + 4-byte seed\nmstore(0x0c, _BALANCE_SLOT_SEED) // 4 bytes at 0x0c\nmstore(0x00, owner)              // 20 bytes ending at 0x14, overlaps seed\nlet slot := keccak256(0x0c, 0x20) // hashes from 0x0c to 0x2c",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any single-key mapping where the key is an address — balance lookups, nonce lookups, single-key permission checks",
+  "when_not_to_apply": "Double mappings requiring two keys (use 0x34-byte hash instead), or when scratch space is already occupied by outer assembly",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

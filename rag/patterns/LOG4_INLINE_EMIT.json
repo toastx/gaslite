@@ -1,0 +1,29 @@
+{
+  "id": "LOG4_INLINE_EMIT",
+  "title": "Emit 4-topic events (TransferSingle) directly via log4 opcode with inline data",
+  "category": "events",
+
+  "trigger_patterns": [
+    "emit TransferSingle in assembly",
+    "log4 opcode for ERC1155 events",
+    "4-topic event with non-indexed data",
+    "inline log4 emission"
+  ],
+
+  "description": "ERC1155 TransferSingle has 4 topics (signature + operator + from + to) and non-indexed data (id, amount). log4 is used directly with pre-written memory containing the non-indexed parameters, avoiding Solidity's emit overhead. The data region is prepared with mstore before the log4 call.",
+
+  "pattern_before": "emit TransferSingle(msg.sender, from, to, id, amount);",
+
+  "pattern_after": "mstore(0x00, id)\nmstore(0x20, amount)\nlog4(0x00, 0x40, _TRANSFER_SINGLE_EVENT_SIGNATURE, caller(), from, to)",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Any event with 4 topics and fixed-size non-indexed data",
+  "when_not_to_apply": "Events with dynamic arrays as non-indexed data (TransferBatch requires different handling)",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

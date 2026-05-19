@@ -1,0 +1,29 @@
+{
+  "id": "EXTCODESIZE_SILENT_SUCCESS_PREVENTION",
+  "title": "Check extcodesize to prevent silent success when calling EOA addresses",
+  "category": "external_interactions",
+
+  "trigger_patterns": [
+    "extcodesize check before call",
+    "EOA silent success prevention",
+    "token address validation",
+    "call to non-contract address"
+  ],
+
+  "description": "When call() targets an EOA (externally owned account), the EVM returns success=1 with returndatasize=0 — identical to a non-standard ERC20 that returns no data. extcodesize(token) distinguishes the two: an EOA has codesize 0, a deployed contract has codesize > 0. Without this check, transferring tokens to/from an EOA address would silently succeed without actually moving any tokens.",
+
+  "pattern_before": "// Vulnerable — silent success on EOA\n(bool success, bytes memory data) = token.call(...);\nrequire(success && (data.length == 0 || abi.decode(data, (bool))));",
+
+  "pattern_after": "// Safe — revert if token is EOA\nif iszero(lt(or(iszero(extcodesize(token)), returndatasize()), success)) {\n    mstore(0x00, 0x7939f424) // TransferFromFailed()\n    revert(0x1c, 0x04)\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any low-level call to a token address that might be user-supplied",
+  "when_not_to_apply": "When the token address is known to be a deployed contract (e.g., hardcoded WETH address)",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}
