@@ -703,6 +703,7 @@ dependencies = [
  "shuttle-turso",
  "tokio",
  "tower-http",
+ "tracing",
  "uuid",
 ]
 

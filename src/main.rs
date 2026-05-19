@@ -1,6 +1,6 @@
 //TODO erc1155
 
-
+use tracing::{info, warn, error};
 use axum::{
     extract::State,
     routing::{get, post},
@@ -249,7 +249,6 @@ impl AppState {
 async fn main(
     #[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore,
 ) -> shuttle_axum::ShuttleAxum {
-
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let deepseek_api_key = secrets
@@ -354,7 +353,7 @@ async fn optimize_contract(
     let query_vec = get_kilo_embedding(&state.http, &payload.contract_source, &state.kilo_api_key)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-
+    info!("--query_vec------");
     // 2. search qdrant
     let search_result = state
         .qdrant
@@ -363,7 +362,21 @@ async fn optimize_contract(
         )
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    
+    // 🔍 Use tracing::info! so Shuttle routes this to your terminal window
+    info!("--- QDRANT RETRIEVED PATTERNS ---");
+    info!("Found {} matching points in vector space.", search_result.result.len());
 
+    for point in &search_result.result {
+        if let payload = &point.payload {
+            if let Some(pattern_id) = payload.get("pattern_id") {
+                info!("Matched Pattern Database ID: {}", pattern_id);
+            } else {
+                warn!("Point found, but it is missing the 'pattern_id' key in its payload.");
+            }
+        }
+    }
+info!("---------------------------------");
     // 3. fetch full patterns from turso
     let mut pattern_contexts: Vec<String> = Vec::new();
     let mut found_pattern_ids: Vec<String> = Vec::new();
@@ -426,6 +439,8 @@ async fn optimize_contract(
 async fn reset_collection(
     State(state): State<Arc<AppState>>,
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
+    let collections = state.qdrant.list_collections().await.unwrap();
+    info!("{:?}", collections);  
     state.qdrant
         .delete_collection(COLLECTION)
         .await
@@ -491,24 +506,18 @@ async fn ingest_local_files(
             None => { failed.push((file_name, "Missing 'id' field".to_string())); continue; }
         };
 
-        // build embed text
-        let title       = meta["title"].as_str().unwrap_or("");
-        let explanation = meta["explanation"].as_str()
-            .or(meta["description"].as_str()).unwrap_or("");
-        let triggers    = meta["trigger_patterns"].to_string();
-        let when_apply  = meta["when_to_apply"].as_str().unwrap_or("");
+        // Extract the core fields
+        let title = meta["title"].as_str().unwrap_or("");
+        let triggers = meta["trigger_patterns"].to_string();
+        let explanation = meta["explanation"].to_string();
+        let when_apply = meta["when_apply"].to_string();
         let solidity_before = meta["solidity_before"].as_str()
             .or(meta["pattern_before"].as_str())
             .unwrap_or("");
-        let yul_optimized = meta["yul_optimized"].as_str()
-            .or(meta["pattern_after"].as_str())
-            .unwrap_or("");
-        let category = meta["category"].as_str().unwrap_or("");
 
         let embed_text = format!(
-            "Title: {title}\nCategory: {category}\nTriggers: {triggers}\n\
-             Explanation: {explanation}\nWhen to apply: {when_apply}\n\
-             Solidity pattern: {solidity_before}\nOptimized: {yul_optimized}"
+            "// Optimization Target: {}\n// Keywords: {}\n{}",
+            title, triggers, solidity_before
         );
 
         // get embedding
@@ -626,9 +635,12 @@ async fn call_deepseek(
     api_key: &str,
 ) -> Result<String, String> {
     let system = "You are Gaslite, an elite EVM gas optimizer for the Mantle L2 network. \
-                  You specialize in YUL assembly optimizations. \
-                  Return optimized Solidity/YUL code with clear explanations \
-                  and estimated gas savings on Mantle.";
+                You specialize in YUL assembly optimizations. \
+                Return optimized Solidity/YUL code with clear explanations \
+                and estimated gas savings on Mantle.\
+                CRITICAL INSTRUCTION FOR `suggested_patterns`: \
+                You MUST only populate the `suggested_patterns` array with the exact IDs of the patterns provided in the context below that you actually applied to the code. \
+                Do not invent pattern IDs or copy them from examples.";
 
     let user = format!(
         "Optimize this Solidity code using the patterns below.\n\n\
