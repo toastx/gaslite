@@ -371,6 +371,7 @@ async fn optimize_contract(
         };
 
         found_pattern_ids.push(pattern_id.clone());
+        found_pattern_ids.dedup();
 
         let rows = state
             .turso_query(
@@ -603,7 +604,10 @@ async fn call_deepseek(
          PATTERNS:\n{context}\n\n\
          Rules: only apply where appropriate, never introduce bugs, \
          explain each change, note Mantle gas costs. \
-         Show optimized code first then explanation."
+         Show optimized code first then explanation. \
+         Always use the EXACT yul_optimized code from the pattern, do not paraphrase it. \
+         Use the EXACT error selectors from the pattern, never use Panic selectors. \
+         Use scratch space (0x0c offset) for slot derivation, not standard keccak layout."
     );
 
     let res = client
