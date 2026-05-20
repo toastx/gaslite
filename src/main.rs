@@ -7,8 +7,7 @@ use axum::{
     Json, Router,
 };
 use qdrant_client::qdrant::{
-    CreateCollectionBuilder, Distance, PointStruct, SearchPointsBuilder,
-    UpsertPointsBuilder, VectorParamsBuilder,
+    Condition, CreateCollectionBuilder, Distance, Filter, PointStruct, SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder
 };
 use qdrant_client::Qdrant;
 use serde::{Deserialize, Serialize};
@@ -369,8 +368,8 @@ async fn optimize_contract(
 
     // Wrap their code in the exact same namespace prefix before calling Kilo Gateway
     let query_text = format!(
-        "TOKEN_STANDARD_NAMESPACE: {}\n{}",
-        detected_namespace, payload.contract_source
+        "TOKEN_STANDARD_NAMESPACE: {:?}\n{}",
+        detected, payload.contract_source
     );
 
     // 1. embed incoming code
@@ -379,7 +378,7 @@ async fn optimize_contract(
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
     // 2. search qdrant with category filter
-    let results = match detected_category {
+    let results = match detected {
         Some(cat) => {
             let cat_results = state.qdrant.search_points(
                 SearchPointsBuilder::new(COLLECTION, query_vec.clone(), 2)
@@ -431,7 +430,7 @@ async fn optimize_contract(
     let mut pattern_contexts: Vec<String> = Vec::new();
     let mut found_pattern_ids: Vec<String> = Vec::new();
 
-    for hit in search_result.result {
+    for hit in results {
         let pattern_id = match hit.payload.get("pattern_id") {
             Some(v) => v.to_string().replace('"', ""),
             None => continue,
@@ -597,9 +596,9 @@ async fn ingest_local_files(
             TursoArg::Text(meta["yul_optimized"].as_str()
                 .or(meta["pattern_after"].as_str()).unwrap_or("").to_string()),
             TursoArg::Text(meta["patterns_used"].to_string()),
-            TursoArg::Text(explanation.to_string()),
+            TursoArg::Text(meta["explanation"].to_string()),
             TursoArg::Text(meta["risk_level"].as_str().unwrap_or("low").to_string()),
-            TursoArg::Text(when_apply.to_string()),
+            TursoArg::Text(meta["when_to_apply"].to_string()),
             TursoArg::Text(meta["when_not_to_apply"].as_str().unwrap_or("").to_string()),
         ];
 
