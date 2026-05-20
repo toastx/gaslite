@@ -1,6 +1,6 @@
 {
   "id": "ERC2981_SET_DEFAULT_ROYALTY",
-  "category": "royalties",
+  "category": "ERC2981",
   "version": "1.0",
   "title": "Optimized update for default royalties using bitwise packing",
   "source": "solady",

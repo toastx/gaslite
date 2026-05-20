@@ -1,6 +1,6 @@
 {
   "id": "ERC2981_ROYALTY_INFO",
-  "category": "royalties",
+  "category": "ERC2981",
   "version": "1.0",
   "title": "Optimized ERC2981 royaltyInfo with fallback storage slots and packed slot extraction",
   "source": "solady",

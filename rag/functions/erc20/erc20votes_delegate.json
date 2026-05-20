@@ -1,6 +1,6 @@
 {
   "id": "ERC20VOTES_DELEGATE",
-  "category": "control_flow",
+  "category": "ERC20",
   "version": "1.0",
   "title": "log4 with zero-length data for fully-indexed 3-topic event",
   "source": "solady",

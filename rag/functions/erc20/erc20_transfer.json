@@ -1,6 +1,6 @@
 {
   "id": "ERC20_TRANSFER",
-  "category": "tokens",
+  "category": "ERC20",
   "version": "1.0",
   "title": "Optimized ERC20 transfer with inline assembly",
   "source": "solady",

@@ -1,6 +1,6 @@
 {
   "id": "ERC20_BALANCE_OF",
-  "category": "tokens",
+  "category": "ERC20",
   "version": "1.0",
   "title": "Optimized balanceOf using scratch space slot derivation",
   "source": "solady",

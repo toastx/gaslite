@@ -1,6 +1,6 @@
 {
   "id": "ERC20_APPROVE",
-  "category": "tokens",
+  "category": "ERC20",
   "version": "1.0",
   "title": "Optimized ERC20 approve with inline slot computation and event emission",
   "source": "solady",

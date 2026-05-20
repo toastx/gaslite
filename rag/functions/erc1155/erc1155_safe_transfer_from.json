@@ -1,6 +1,6 @@
 {
   "id": "ERC1155_SAFE_TRANSFER_FROM",
-  "category": "tokens",
+  "category": "ERC1155",
   "version": "1.0",
   "title": "Optimized ERC1155 safeTransferFrom with inline slot derivation and external call checks",
   "source": "solady",

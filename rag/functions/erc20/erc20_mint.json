@@ -1,6 +1,6 @@
 {
   "id": "ERC20_MINT",
-  "category": "tokens",
+  "category": "ERC20",
   "version": "1.0",
   "title": "Optimized _mint with overflow check and inline total supply update",
   "source": "solady",

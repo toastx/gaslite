@@ -1,7 +1,7 @@
 
 {
   "id": "ERC1155_SAFE_BATCH_TRANSFER_FROM",
-  "category": "tokens",
+  "category": "ERC1155",
   "version": "1.0",
   "title": "Optimized ERC1155 safeBatchTransferFrom with identity precompile batch copy",
   "source": "solady",
