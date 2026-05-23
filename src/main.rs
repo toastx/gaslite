@@ -19,6 +19,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use solang_parser::pt::{ContractPart, SourceUnitPart};
 
+
 // ── constants ─────────────────────────────────────────────────────────────────
 const COLLECTION: &str = "gaslite_patterns";
 const VECTOR_DIM: u64 = 1536;
@@ -553,7 +554,7 @@ async fn reset_collection(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let existing = qdrant
+    let existing = state.qdrant
     .list_collections()
     .await
     .expect("Failed to list Qdrant collections");
@@ -569,7 +570,7 @@ async fn reset_collection(
     }
 
     // Create keyword index on category field for filtering
-    qdrant
+    state.qdrant
         .create_field_index(
             CreateFieldIndexCollectionBuilder::new(
                 COLLECTION,
@@ -581,7 +582,7 @@ async fn reset_collection(
         .expect("Failed to create category index");
 
     // Also create index on entry_type if you're using that field
-    qdrant
+    state.qdrant
         .create_field_index(
             CreateFieldIndexCollectionBuilder::new(
                 COLLECTION,
