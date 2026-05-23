@@ -9,6 +9,7 @@ use axum::{
 use qdrant_client::qdrant::{
     Condition, CreateCollectionBuilder, Distance, Filter, PointStruct, SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder
 };
+use qdrant_client::qdrant::{CreateFieldIndexCollectionBuilder, FieldType};
 use qdrant_client::Qdrant;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
+use solang_parser::pt::{ContractPart, SourceUnitPart};
 
 // ── constants ─────────────────────────────────────────────────────────────────
 const COLLECTION: &str = "gaslite_patterns";
@@ -485,11 +487,71 @@ async fn optimize_contract(
     }))
 }
 
+
+
+/// Parses raw Solidity to extract the contract category and function signatures
+fn analyze_contract_ast(source: &str) -> (Option<&'static str>, Vec<String>) {
+    let mut detected_cat = None;
+    let mut key_ops = Vec::new();
+
+    // Parse the Solidity source code
+    if let Ok((source_unit, _)) = solang_parser::parse(source, 0) {
+        for part in source_unit.0 {
+            if let SourceUnitPart::ContractDefinition(def) = part {
+                
+                // 1. Check inherited contracts (e.g., `contract MyToken is ERC20`)
+                for base in &def.base {
+                    let base_name = base.name.identifiers.iter()
+                        .map(|id| id.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    
+                    let lower = base_name.to_lowercase();
+                    if lower.contains("erc721") { detected_cat = Some("erc721"); }
+                    else if lower.contains("erc1155") { detected_cat = Some("erc1155"); }
+                    else if lower.contains("erc20") { detected_cat = Some("erc20"); }
+                }
+
+                // 2. Extract functions for query enrichment and heuristic matching
+                for contract_part in &def.parts {
+                    if let ContractPart::FunctionDefinition(func) = contract_part {
+                        if let Some(name_ident) = &func.name {
+                            let func_name = name_ident.name.as_str();
+                            key_ops.push(func_name.to_string());
+
+                            // Signature heuristics if base contract didn't reveal it explicitly
+                            match func_name {
+                                "ownerOf" | "tokenURI" | "setApprovalForAll" => {
+                                    if detected_cat.is_none() { detected_cat = Some("erc721"); }
+                                }
+                                "safeBatchTransferFrom" | "balanceOfBatch" => {
+                                    if detected_cat.is_none() { detected_cat = Some("erc1155"); }
+                                }
+                                "totalSupply" | "allowance" => {
+                                    if detected_cat.is_none() { detected_cat = Some("erc20"); }
+                                }
+                                "stake" | "rewardPerToken" | "earned" => {
+                                    if detected_cat.is_none() { detected_cat = Some("defi_staking"); }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    key_ops.sort();
+    key_ops.dedup();
+    
+    (detected_cat, key_ops)
+}
+
 async fn reset_collection(
     State(state): State<Arc<AppState>>,
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
-    let collections = state.qdrant.list_collections().await.unwrap();
-    info!("{:?}", collections);  
+
     state.qdrant
         .delete_collection(COLLECTION)
         .await
@@ -503,7 +565,46 @@ async fn reset_collection(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok("Collection reset successfully")
+    let existing = qdrant
+    .list_collections()
+    .await
+    .expect("Failed to list Qdrant collections");
+
+    if !existing.collections.iter().any(|c| c.name == COLLECTION) {
+        qdrant
+            .create_collection(
+                CreateCollectionBuilder::new(COLLECTION)
+                    .vectors_config(VectorParamsBuilder::new(VECTOR_DIM, Distance::Cosine)),
+            )
+            .await
+            .expect("Failed to create Qdrant collection");
+    }
+
+    // Create keyword index on category field for filtering
+    qdrant
+        .create_field_index(
+            CreateFieldIndexCollectionBuilder::new(
+                COLLECTION,
+                "category",
+                FieldType::Keyword,
+            )
+        )
+        .await
+        .expect("Failed to create category index");
+
+    // Also create index on entry_type if you're using that field
+    qdrant
+        .create_field_index(
+            CreateFieldIndexCollectionBuilder::new(
+                COLLECTION,
+                "entry_type", 
+                FieldType::Keyword,
+            )
+        )
+        .await
+        .expect("Failed to create entry_type index");
+
+        Ok("Collection reset successfully")
 }
 
 async fn ingest_local_files(
