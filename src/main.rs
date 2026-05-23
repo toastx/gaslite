@@ -423,8 +423,14 @@ async fn optimize_contract(
     let mut found_pattern_ids: Vec<String> = Vec::new();
 
     for hit in results {
+        
         let pattern_id = match hit.payload.get("pattern_id") {
-            Some(v) => v.to_string().replace('"', ""),
+            Some(v) => {
+                let raw = v.to_string();
+                let cleaned = raw.trim().replace('"', "").to_string();
+                info!("Cleaned pattern_id: '{}'", cleaned);
+                cleaned
+            },
             None => continue,
         };
 
@@ -439,6 +445,12 @@ async fn optimize_contract(
             )
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+        info!("Turso rows for '{}': {}", pattern_id, rows.len());
+        if rows.is_empty() {
+            warn!("No Turso data found for pattern: {}", pattern_id);
+            continue; // skip this pattern
+        }
 
         if let Some(row) = rows.first() {
             let get = |key: &str| {
@@ -480,61 +492,182 @@ async fn optimize_contract(
 
 /// Parses raw Solidity to extract the contract category and function signatures
 fn analyze_contract_ast(source: &str) -> (Option<&'static str>, Vec<String>) {
-    let mut detected_cat = None;
-    let mut key_ops = Vec::new();
-
-    // Parse the Solidity source code
-    if let Ok((source_unit, _)) = solang_parser::parse(source, 0) {
-        for part in source_unit.0 {
-            if let SourceUnitPart::ContractDefinition(def) = part {
-                
-                // 1. Check inherited contracts (e.g., `contract MyToken is ERC20`)
-                for base in &def.base {
-                    let base_name = base.name.identifiers.iter()
-                        .map(|id| id.name.clone())
-                        .collect::<Vec<_>>()
-                        .join(".");
-                    
-                    let lower = base_name.to_lowercase();
-                    if lower.contains("erc721") { detected_cat = Some("erc721"); }
-                    else if lower.contains("erc1155") { detected_cat = Some("erc1155"); }
-                    else if lower.contains("erc20") { detected_cat = Some("erc20"); }
+    let mut detected_cat: Option<&'static str> = None;
+    let mut key_ops: Vec<String> = Vec::new();
+ 
+    let Ok((source_unit, _)) = solang_parser::parse(source, 0) else {
+        // fallback: basic string scan if parser fails
+        return analyze_contract_fallback(source);
+    };
+ 
+    for part in source_unit.0 {
+        let SourceUnitPart::ContractDefinition(def) = part else { continue };
+ 
+        // ── 1. Inheritance detection ──────────────────────────────────────────
+        for base in &def.base {
+            let base_name = base.name.identifiers.iter()
+                .map(|id| id.name.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(".");
+ 
+            if detected_cat.is_none() {
+                detected_cat = match base_name.as_str() {
+                    s if s.contains("erc721")  => Some("erc721"),
+                    s if s.contains("erc1155") => Some("erc1155"),
+                    s if s.contains("erc20")   => Some("erc20"),
+                    s if s.contains("erc2981") => Some("erc2981"),
+                    _                           => None,
+                };
+            }
+        }
+ 
+        // ── 2. Function-level analysis ────────────────────────────────────────
+        for contract_part in &def.parts {
+            let ContractPart::FunctionDefinition(func) = contract_part else { continue };
+ 
+            // 2a. Function name heuristics
+            if let Some(name_ident) = &func.name {
+                let func_name = name_ident.name.as_str();
+                key_ops.push(func_name.to_string());
+ 
+                if detected_cat.is_none() {
+                    detected_cat = match func_name {
+                        // ERC721
+                        "ownerOf" | "tokenURI" | "setApprovalForAll"
+                        | "getApproved" | "safeTransferFrom" => Some("erc721"),
+ 
+                        // ERC1155
+                        "safeBatchTransferFrom" | "balanceOfBatch"
+                        | "onERC1155Received" => Some("erc1155"),
+ 
+                        // ERC20
+                        "totalSupply" | "allowance" | "permit" => Some("erc20"),
+ 
+                        // DeFi staking
+                        "stake" | "unstake" | "rewardPerToken"
+                        | "earned" | "getReward" | "notifyRewardAmount" => Some("defi_staking"),
+ 
+                        // DeFi AMM
+                        "swap" | "addLiquidity" | "removeLiquidity"
+                        | "getAmountOut" | "getAmountIn" => Some("defi_amm"),
+ 
+                        // DeFi lending
+                        "borrow" | "repay" | "liquidate"
+                        | "supply" | "withdraw" | "getHealthFactor" => Some("defi_lending"),
+ 
+                        _ => None,
+                    };
                 }
-
-                // 2. Extract functions for query enrichment and heuristic matching
-                for contract_part in &def.parts {
-                    if let ContractPart::FunctionDefinition(func) = contract_part {
-                        if let Some(name_ident) = &func.name {
-                            let func_name = name_ident.name.as_str();
-                            key_ops.push(func_name.to_string());
-
-                            // Signature heuristics if base contract didn't reveal it explicitly
-                            match func_name {
-                                "ownerOf" | "tokenURI" | "setApprovalForAll" => {
-                                    if detected_cat.is_none() { detected_cat = Some("erc721"); }
-                                }
-                                "safeBatchTransferFrom" | "balanceOfBatch" => {
-                                    if detected_cat.is_none() { detected_cat = Some("erc1155"); }
-                                }
-                                "totalSupply" | "allowance" => {
-                                    if detected_cat.is_none() { detected_cat = Some("erc20"); }
-                                }
-                                "stake" | "rewardPerToken" | "earned" => {
-                                    if detected_cat.is_none() { detected_cat = Some("defi_staking"); }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
+            }
+ 
+            // 2b. Function body analysis
+            if let Some(body) = &func.body {
+                let body_str = format!("{body:?}");
+ 
+                // EVM operation signals
+                if body_str.contains("Assembly") || body_str.contains("assembly") {
+                    key_ops.push("inline_assembly".to_string());
+                }
+                if body_str.contains("For(") || body_str.contains("While(") {
+                    key_ops.push("loop_iteration".to_string());
+                }
+                if body_str.contains("Emit(") {
+                    key_ops.push("event_emission".to_string());
+                }
+ 
+                // External call detection
+                if body_str.contains("transferFrom") {
+                    key_ops.push("erc20_transfer_from".to_string());
+                    if detected_cat.is_none() { detected_cat = Some("erc20"); }
+                }
+                if body_str.contains("transfer") && !body_str.contains("transferFrom") {
+                    key_ops.push("erc20_transfer".to_string());
+                }
+                if body_str.contains("IERC20") || body_str.contains("ERC20(") {
+                    key_ops.push("erc20_external_call".to_string());
+                    if detected_cat.is_none() { detected_cat = Some("erc20"); }
+                }
+                if body_str.contains("IERC721") || body_str.contains("ERC721(") {
+                    key_ops.push("erc721_external_call".to_string());
+                    if detected_cat.is_none() { detected_cat = Some("erc721"); }
+                }
+ 
+                // ETH handling
+                if body_str.contains("selfbalance")
+                    || body_str.contains("address(this).balance")
+                    || body_str.contains("msg.value") {
+                    key_ops.push("eth_handling".to_string());
+                }
+ 
+                // Storage patterns
+                if body_str.contains("mapping") {
+                    key_ops.push("mapping_access".to_string());
+                }
+ 
+                // Reward/staking body signals
+                if body_str.contains("rewardDebt") || body_str.contains("rewardPerToken") {
+                    key_ops.push("reward_calculation".to_string());
+                    if detected_cat.is_none() { detected_cat = Some("defi_staking"); }
                 }
             }
         }
     }
-    
+ 
     key_ops.sort();
     key_ops.dedup();
-    
+ 
     (detected_cat, key_ops)
+}
+ 
+// ── Fallback: plain string scan when Solang fails to parse ────────────────────
+fn analyze_contract_fallback(source: &str) -> (Option<&'static str>, Vec<String>) {
+    let lower = source.to_lowercase();
+    let mut key_ops = Vec::new();
+ 
+    let detected_cat = if lower.contains("ownerof") || lower.contains("tokenuri") {
+        Some("erc721")
+    } else if lower.contains("safebatchtransferfrom") || lower.contains("balanceofbatch") {
+        Some("erc1155")
+    } else if lower.contains("totalsupply") || lower.contains("allowance") {
+        Some("erc20")
+    } else if lower.contains("stake") || lower.contains("rewarddebt") {
+        Some("defi_staking")
+    } else if lower.contains("swap") || lower.contains("amountout") {
+        Some("defi_amm")
+    } else if lower.contains("borrow") || lower.contains("collateral") {
+        Some("defi_lending")
+    } else {
+        None
+    };
+ 
+    if lower.contains("transferfrom") { key_ops.push("erc20_transfer_from".to_string()); }
+    if lower.contains("selfbalance") || lower.contains("msg.value") {
+        key_ops.push("eth_handling".to_string());
+    }
+    if lower.contains("assembly") { key_ops.push("inline_assembly".to_string()); }
+    if lower.contains("for ") || lower.contains("while ") {
+        key_ops.push("loop_iteration".to_string());
+    }
+    if lower.contains("emit ") { key_ops.push("event_emission".to_string()); }
+ 
+    key_ops.sort();
+    key_ops.dedup();
+ 
+    (detected_cat, key_ops)
+}
+ 
+// ── Category → Qdrant filter mapping ─────────────────────────────────────────
+// Only token standards get a category filter.
+// DeFi categories fall through to unfiltered search since those
+// knowledge base entries don't have specific category values yet.
+fn filter_category(cat: Option<&'static str>) -> Option<&'static str> {
+    match cat {
+        Some("erc20") => Some("erc20"),
+        Some("erc721") => Some("erc721"),
+        Some("erc1155") => Some("erc1155"),
+        Some("erc2981") => Some("erc2981"),
+        _ => None, // defi_staking, defi_amm, defi_lending, general → no filter
+    }
 }
 
 async fn reset_collection(
