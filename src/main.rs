@@ -351,35 +351,23 @@ async fn optimize_contract(
     Json(payload): Json<OptimizeRequest>,
 ) -> Result<Json<OptimizeResponse>, (axum::http::StatusCode, String)> {
 
-    let src = payload.contract_source.to_lowercase();
-    let detected = if src.contains("ownerof") 
-        || src.contains("tokenuri") 
-        || src.contains("erc721") {
-        Some("tokens")  // erc721
-    } else if src.contains("erc1155") 
-        || src.contains("safetransferfrom")
-        && src.contains("uint256 id") {
-        Some("tokens")  // erc1155  
-    } else if src.contains("totalsupply")
-        || src.contains("allowance")
-        || src.contains("erc20") {
-        Some("tokens")  // erc20
-    } else {
-        None  // search all
-    };
+    // 1. Use Solang AST to extract true intent and operations (0ms latency, 0 cost)
+    let (detected, key_ops) = analyze_contract_ast(&payload.contract_source);
+    let category_str = detected.unwrap_or("general");
 
-    // Wrap their code in the exact same namespace prefix before calling Kilo Gateway
+    // Build a semantic embedding query instead of embedding the raw, noisy code
     let query_text = format!(
-        "TOKEN_STANDARD_NAMESPACE: {:?}\n{}",
-        detected, payload.contract_source
+        "TOKEN_STANDARD_NAMESPACE: {}\n// Operations detected: {}",
+        category_str.to_uppercase(),
+        key_ops.join(", ")
     );
 
-    // 1. embed incoming code
+    // 2. Embed incoming clean string
     let query_vec = get_kilo_embedding(&state.http, &query_text, &state.kilo_api_key)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
-    // 2. search qdrant with category filter
+    // 3. Search Qdrant with category filter
     let results = match detected {
         Some(cat) => {
             let cat_results = state.qdrant.search_points(
@@ -416,7 +404,7 @@ async fn optimize_contract(
         }
     };
 
-    // 3. log results
+    // 4. Log results
     info!("--- QDRANT RETRIEVED PATTERNS ---");
     info!("Found {} matching points.", results.len());
 
@@ -428,7 +416,8 @@ async fn optimize_contract(
         }
     }
     info!("---------------------------------");
-    // 3. fetch full patterns from turso
+
+    // 5. Fetch full patterns from Turso
     let mut pattern_contexts: Vec<String> = Vec::new();
     let mut found_pattern_ids: Vec<String> = Vec::new();
 
@@ -471,7 +460,7 @@ async fn optimize_contract(
 
     let context = pattern_contexts.join("\n\n---\n\n");
 
-    // 4. call deepseek
+    // 6. Call DeepSeek
     let optimized_code =
         call_deepseek(&state.http, &payload.contract_source, &context, &state.deepseek_api_key)
             .await
@@ -486,7 +475,6 @@ async fn optimize_contract(
         optimized_code,
     }))
 }
-
 
 
 /// Parses raw Solidity to extract the contract category and function signatures
