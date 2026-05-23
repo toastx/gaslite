@@ -6,9 +6,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use qdrant_client::qdrant::{
+use qdrant_client::{Payload, qdrant::{
     Condition, CreateCollectionBuilder, Distance, Filter, PointStruct, SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder
-};
+}};
 use qdrant_client::qdrant::{CreateFieldIndexCollectionBuilder, FieldType};
 use qdrant_client::Qdrant;
 use serde::{Deserialize, Serialize};
@@ -118,7 +118,7 @@ struct OptimizeResponse {
 
 #[derive(Deserialize)]
 struct IngestLocalRequest {
-    directory_path: String,
+    directory_paths: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -560,7 +560,7 @@ async fn reset_collection(
     .expect("Failed to list Qdrant collections");
 
     if !existing.collections.iter().any(|c| c.name == COLLECTION) {
-        qdrant
+        state.qdrant
             .create_collection(
                 CreateCollectionBuilder::new(COLLECTION)
                     .vectors_config(VectorParamsBuilder::new(VECTOR_DIM, Distance::Cosine)),
@@ -600,136 +600,121 @@ async fn ingest_local_files(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<IngestLocalRequest>,
 ) -> Result<Json<IngestLocalResponse>, (axum::http::StatusCode, String)> {
-    let mut successful: Vec<String> = Vec::new();
-    let mut failed: Vec<(String, String)> = Vec::new();
+    let mut successful = Vec::new();
+    let mut failed = Vec::new();
 
-    let dir = Path::new(&payload.directory_path);
-    if !dir.is_dir() {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            format!("'{}' is not a valid directory", payload.directory_path),
-        ));
+    for dir_path in payload.directory_paths {
+        let dir = Path::new(&dir_path);
+        
+        if !dir.is_dir() {
+            failed.push((dir_path, "Not a valid directory".to_string()));
+            continue;
+        }
+
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                failed.push((dir_path, format!("Cannot read directory: {e}")));
+                continue;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let file_path = entry.path();
+            if file_path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+
+            let file_name = file_path.file_name().unwrap().to_string_lossy().into_owned();
+
+            let content = match fs::read_to_string(&file_path) {
+                Ok(c) => c,
+                Err(e) => { failed.push((file_name, format!("Read error: {e}"))); continue; }
+            };
+
+            let meta: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(e) => { failed.push((file_name, format!("Invalid JSON: {e}"))); continue; }
+            };
+
+            // Use clean let-else syntax for the critical ID extraction
+            let Some(id) = meta["id"].as_str().map(String::from) else {
+                failed.push((file_name, "Missing 'id' field".to_string()));
+                continue;
+            };
+
+            // Extract core fields exactly once to clean up database injection
+            let category = meta["category"].as_str().unwrap_or("general");
+            let triggers = meta["trigger_patterns"].to_string();
+            let sol_before = meta["solidity_before"].as_str().or(meta["pattern_before"].as_str()).unwrap_or("");
+
+            // Format embedding string
+            let embed_text = format!(
+                "TOKEN_STANDARD_NAMESPACE: {}\n// Target: {}\n// Triggers: {}\n{}",
+                category.to_uppercase(),
+                meta["title"].as_str().unwrap_or(""),
+                triggers,
+                sol_before
+            );
+
+            let vector = match get_kilo_embedding(&state.http, &embed_text, &state.kilo_api_key).await {
+                Ok(v) => v,
+                Err(e) => { failed.push((id, format!("Embedding error: {e}"))); continue; }
+            };
+
+            // Turso SQL Insert
+            let sql = "INSERT OR REPLACE INTO optimization_patterns \
+                (id,category,version,title,source,source_file,difficulty,mantle_specific,\
+                 evm_version,trigger_patterns,solidity_before,yul_optimized,patterns_used,\
+                 explanation,risk_level,when_to_apply,when_not_to_apply) \
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
+            let args = vec![
+                TursoArg::Text(id.clone()),
+                TursoArg::Text(category.to_string()),
+                TursoArg::Text(meta["version"].as_str().unwrap_or("1.0").to_string()),
+                TursoArg::Text(meta["title"].as_str().unwrap_or("").to_string()),
+                TursoArg::Text(meta["source"].as_str().unwrap_or("").to_string()),
+                TursoArg::Text(meta["source_file"].as_str().unwrap_or("").to_string()),
+                TursoArg::Text(meta["difficulty"].as_str().unwrap_or("medium").to_string()),
+                TursoArg::Integer((meta["mantle_specific"].as_bool().unwrap_or(false) as i64).to_string()),
+                TursoArg::Text(meta["evm_version"].as_str().unwrap_or("paris").to_string()),
+                TursoArg::Text(triggers),
+                TursoArg::Text(sol_before.to_string()),
+                TursoArg::Text(meta["yul_optimized"].as_str().or(meta["pattern_after"].as_str()).unwrap_or("").to_string()),
+                TursoArg::Text(meta["patterns_used"].to_string()),
+                TursoArg::Text(meta["explanation"].to_string()),
+                TursoArg::Text(meta["risk_level"].as_str().unwrap_or("low").to_string()),
+                TursoArg::Text(meta["when_to_apply"].to_string()),
+                TursoArg::Text(meta["when_not_to_apply"].as_str().unwrap_or("").to_string()),
+            ];
+
+            if let Err(e) = state.turso_execute(sql, args).await {
+                failed.push((id, format!("Turso error: {e}")));
+                continue;
+            }
+
+            // Clean Qdrant Payload Construction
+            let qdrant_payload: Payload = serde_json::json!({
+                "pattern_id": id.clone(),
+                "category": category
+            })
+            .try_into()
+            .expect("Failed to parse JSON into Qdrant Payload");
+
+            let point = PointStruct::new(Uuid::new_v4().to_string(), vector, qdrant_payload);
+
+            if let Err(e) = state.qdrant.upsert_points(UpsertPointsBuilder::new(COLLECTION, vec![point])).await {
+                failed.push((id, format!("Qdrant error: {e}")));
+                continue;
+            }
+
+            successful.push(id);
+        }
     }
 
-    let entries = fs::read_dir(dir).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Cannot read directory: {e}"),
-        )
-    })?;
-
-    for entry in entries.flatten() {
-        let file_path = entry.path();
-        if file_path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-
-        let file_name = file_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        let content = match fs::read_to_string(&file_path) {
-            Ok(c) => c,
-            Err(e) => { failed.push((file_name, format!("Read error: {e}"))); continue; }
-        };
-
-        let meta: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(e) => { failed.push((file_name, format!("Invalid JSON: {e}"))); continue; }
-        };
-
-        let id = match meta["id"].as_str() {
-            Some(v) => v.to_string(),
-            None => { failed.push((file_name, "Missing 'id' field".to_string())); continue; }
-        };
-
-        // Extract the core fields
-        let category = meta["category"].as_str().unwrap_or("general").to_uppercase();
-        let title = meta["title"].as_str().unwrap_or("");
-        let triggers = meta["trigger_patterns"].to_string();
-        let solidity_before = meta["solidity_before"].as_str().unwrap_or("");
-
-        // Prepend a rigid token namespace constraint
-        let embed_text = format!(
-            "TOKEN_STANDARD_NAMESPACE: {}\n// Target: {}\n// Triggers: {}\n{}",
-            category, title, triggers, solidity_before
-        );
-
-        // get embedding
-        let vector = match get_kilo_embedding(&state.http, &embed_text, &state.kilo_api_key).await {
-            Ok(v) => v,
-            Err(e) => { failed.push((id, format!("Embedding error: {e}"))); continue; }
-        };
-
-        // write to turso via HTTP
-        let sql = "INSERT OR REPLACE INTO optimization_patterns \
-            (id,category,version,title,source,source_file,difficulty,mantle_specific,\
-             evm_version,trigger_patterns,solidity_before,yul_optimized,patterns_used,\
-             explanation,risk_level,when_to_apply,when_not_to_apply) \
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
-
-        let args = vec![
-            TursoArg::Text(id.clone()),
-            TursoArg::Text(meta["category"].as_str().unwrap_or("general").to_string()),
-            TursoArg::Text(meta["version"].as_str().unwrap_or("1.0").to_string()),
-            TursoArg::Text(title.to_string()),
-            TursoArg::Text(meta["source"].as_str().unwrap_or("").to_string()),
-            TursoArg::Text(meta["source_file"].as_str().unwrap_or("").to_string()),
-            TursoArg::Text(meta["difficulty"].as_str().unwrap_or("medium").to_string()),
-            TursoArg::Integer((meta["mantle_specific"].as_bool().unwrap_or(false) as i64).to_string()),
-            TursoArg::Text(meta["evm_version"].as_str().unwrap_or("paris").to_string()),
-            TursoArg::Text(triggers),
-            TursoArg::Text(meta["solidity_before"].as_str()
-                .or(meta["pattern_before"].as_str()).unwrap_or("").to_string()),
-            TursoArg::Text(meta["yul_optimized"].as_str()
-                .or(meta["pattern_after"].as_str()).unwrap_or("").to_string()),
-            TursoArg::Text(meta["patterns_used"].to_string()),
-            TursoArg::Text(meta["explanation"].to_string()),
-            TursoArg::Text(meta["risk_level"].as_str().unwrap_or("low").to_string()),
-            TursoArg::Text(meta["when_to_apply"].to_string()),
-            TursoArg::Text(meta["when_not_to_apply"].as_str().unwrap_or("").to_string()),
-        ];
-
-        if let Err(e) = state.turso_execute(sql, args).await {
-            failed.push((id, format!("Turso error: {e}")));
-            continue;
-        }
-
-        // upsert into qdrant
-        let mut qdrant_payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
-        qdrant_payload.insert(
-            "pattern_id".to_string(),
-            qdrant_client::qdrant::Value::from(id.clone()),
-        );
-        qdrant_payload.insert(
-            "category".to_string(),
-            qdrant_client::qdrant::Value::from(
-                meta["category"].as_str().unwrap_or("general").to_string()
-            ),
-        );
-
-        let point = PointStruct::new(Uuid::new_v4().to_string(), vector, qdrant_payload);
-
-        if let Err(e) = state
-            .qdrant
-            .upsert_points(UpsertPointsBuilder::new(COLLECTION, vec![point]))
-            .await
-        {
-            failed.push((id, format!("Qdrant error: {e}")));
-            continue;
-        }
-
-        successful.push(id);
-    }
-
-    Ok(Json(IngestLocalResponse {
-        successful_patterns: successful,
-        failed_patterns: failed,
-    }))
+    Ok(Json(IngestLocalResponse { successful_patterns: successful, failed_patterns: failed }))
 }
-
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 async fn get_kilo_embedding(
