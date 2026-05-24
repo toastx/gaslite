@@ -1,0 +1,41 @@
+{
+  "id": "ANTIPATTERN_WRONG_REVERT_OFFSET",
+  "type": "antipattern",
+  "category": "control_flow",
+  "version": "1.0",
+  "title": "Using revert(0x00, 0x04) instead of revert(0x1c, 0x04) for 4-byte custom errors",
+  "source": "gaslite_error_corpus",
+
+  "trigger_patterns": [
+    "revert with 4 byte custom error selector",
+    "custom error revert in assembly",
+    "mstore error selector then revert",
+    "revert after mstore 0x00 selector",
+    "insufficient balance revert assembly",
+    "custom error selector revert offset"
+  ],
+
+  "wrong_code": "// WRONG — reads 4 bytes from offset 0x00\n// but mstore writes 32 bytes, selector is in the LAST 4 bytes\nmstore(0x00, 0xf4d678b8) // InsufficientBalance()\nrevert(0x00, 0x04)        // returns first 4 bytes = 0xf4d678b8 + 28 zero bytes stripped to 4",
+
+  "correct_code": "// CORRECT — selector sits at bytes [28..32] of the 32-byte word\n// revert(0x1c, 0x04) reads exactly those 4 bytes\nmstore(0x00, 0xf4d678b8) // InsufficientBalance() written to slot 0x00\nrevert(0x1c, 0x04)        // 0x1c = 28, reads bytes [28..32] = the selector",
+
+  "explanation": "mstore(0x00, value) writes a full 32-byte word at offset 0x00. A 4-byte selector like 0xf4d678b8 is stored right-aligned, meaning it occupies bytes 28-31 (offsets 0x1c-0x1f). revert(0x1c, 0x04) correctly reads exactly those 4 bytes. revert(0x00, 0x04) reads bytes 0-3 which are 0x00000000 — returning an empty or zeroed selector.",
+
+  "why_wrong": "revert(0x00, 0x04) returns the first 4 bytes of the 32-byte word which are all zeros when a 4-byte selector is stored. The ABI decoder receives 0x00000000 instead of the actual error selector, making the error undecodable in explorers and client code.",
+
+  "correct_selectors": {
+    "InsufficientBalance()": "0xf4d678b8",
+    "InsufficientAllowance()": "0x13be252b",
+    "TransferFailed()": "0x90b8ec18",
+    "ETHTransferFailed()": "0xb12d13eb",
+    "NotOwner()": "0x30cd7471",
+    "TokenDoesNotExist()": "0xceea21b6",
+    "TokenAlreadyExists()": "0xc991cbb1",
+    "Unauthorized()": "0x82b42900"
+  },
+
+  "gas_impact": "Zero gas difference — this is a correctness bug not a gas bug",
+  "risk_level": "critical",
+  "mantle_specific": false,
+  "evm_version": "paris"
+}

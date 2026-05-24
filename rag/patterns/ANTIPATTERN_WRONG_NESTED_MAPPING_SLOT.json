@@ -1,0 +1,33 @@
+{
+  "id": "ANTIPATTERN_WRONG_NESTED_MAPPING_SLOT",
+  "type": "antipattern",
+  "category": "storage",
+  "version": "1.0",
+  "title": "Incorrect nested mapping slot derivation — wrong key order or wrong hash input size",
+  "source": "gaslite_error_corpus",
+
+  "trigger_patterns": [
+    "nested mapping slot derivation",
+    "allowances mapping assembly access",
+    "transferFrom allowance storage slot",
+    "mapping of mapping keccak256",
+    "double keccak256 for nested mapping",
+    "allowance slot computation assembly"
+  ],
+
+  "wrong_code": "// WRONG A — inverted key order and wrong input region\nmstore(0x0c, caller())\nmstore(0x00, from)\nlet slot1 := keccak256(0x0c, 0x20)  // only hashes 32 bytes from 0x0c\nmstore(0x0c, slot1)\nmstore(0x00, 0x01)\nlet allowanceKey := keccak256(0x0c, 0x20)\n\n// WRONG B — uses scratch space offset (0x0c) but hashes wrong region\nmstore(0x0c, _ALLOWANCE_SEED)\nmstore(0x00, from)\nlet outer := keccak256(0x0c, 0x20)  // misses the seed overlap trick",
+
+  "correct_code": "// CORRECT — standard Solidity nested mapping layout\n// allowances[from][caller] where allowances is at storage slot N\n\n// Step 1: derive outer slot = keccak256(from, N)\nmstore(0x00, from)\nmstore(0x20, ALLOWANCES_SLOT) // the declared slot number of the mapping\nlet outerSlot := keccak256(0x00, 0x40) // hash 64 bytes\n\n// Step 2: derive inner slot = keccak256(caller, outerSlot)\nmstore(0x00, caller())\nmstore(0x20, outerSlot)\nlet allowanceKey := keccak256(0x00, 0x40) // hash 64 bytes\nlet allowance := sload(allowanceKey)\n\n// CORRECT — Solady style using seed packing (more gas efficient)\n// Packs outer key + seed into one 32-byte slot using OR\nlet from_ := shl(96, from)\nmstore(0x0c, or(from_, _ALLOWANCE_SLOT_SEED))\nmstore(0x20, caller())\nlet allowanceKey := keccak256(0x0c, 0x34) // 0x34 = 52 bytes",
+
+  "explanation": "Solidity derives nested mapping slots as: slot(map[k1][k2]) = keccak256(k2 . keccak256(k1 . declared_slot)). The outer key (k1) and the mapping's declared slot number are hashed first to get the intermediate slot, then the inner key (k2) is hashed with that to get the final slot. Both hash inputs must be exactly 64 bytes (key padded to 32 + slot padded to 32). Using keccak256(0x0c, 0x20) only hashes 32 bytes which produces a completely wrong slot.",
+
+  "why_wrong": "Wrong slot derivation causes sload to read from a completely different storage location than where Solidity wrote the data. The contract silently reads zero or stale data instead of the actual allowance, making every transferFrom either always pass (reads 0 < amount = false check passes) or always fail with wrong values.",
+
+  "correct_usage_table": {
+
+  },
+  "gas_impact": "Zero gas difference — this is a critical correctness bug that silently corrupts state",
+  "risk_level": "critical",
+  "mantle_specific": false,
+  "evm_version": "paris"
+}

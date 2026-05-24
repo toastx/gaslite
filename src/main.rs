@@ -420,6 +420,7 @@ async fn optimize_contract(
 
     // 5. Fetch full patterns from Turso
     let mut pattern_contexts: Vec<String> = Vec::new();
+    let mut anti_pattern_contexts: Vec<String> = Vec::new();
     let mut found_pattern_ids: Vec<String> = Vec::new();
 
     for hit in results {
@@ -471,7 +472,65 @@ async fn optimize_contract(
         }
     }
 
-    let context = pattern_contexts.join("\n\n---\n\n");
+    let anti_results = state.qdrant.search_points(
+    SearchPointsBuilder::new(COLLECTION, query_vec.clone(), 2)
+        .with_payload(true)
+        .filter(Filter::must([
+            Condition::matches("type", "antipattern".to_string())
+        ]))
+    ).await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.result;
+
+    for hit in anti_results {
+        
+        let pattern_id = match hit.payload.get("pattern_id") {
+            Some(v) => {
+                let raw = v.to_string();
+                let cleaned = raw.trim().replace('"', "").to_string();
+                info!("Cleaned pattern_id: '{}'", cleaned);
+                cleaned
+            },
+            None => continue,
+        };
+
+        found_pattern_ids.push(pattern_id.clone());
+        found_pattern_ids.dedup();
+
+        let rows = state
+            .turso_query(
+                "SELECT title, explanation, wrong_code, correct_code, correct_usage_table \
+                 FROM optimization_patterns WHERE id = ?",
+                vec![TursoArg::Text(pattern_id.clone())],
+            )
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+        info!("Turso rows for '{}': {}", pattern_id, rows.len());
+        if rows.is_empty() {
+            warn!("No Turso data found for pattern: {}", pattern_id);
+            continue; // skip this pattern
+        }
+
+        if let Some(row) = rows.first() {
+            let get = |key: &str| {
+                row.get(key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+
+            anti_pattern_contexts.push(format!(
+                "ANTI_PATTERN: {}\nExplanation: {}\nWrong Code:\n{}\nCorrect Code {}\n Usage Table: {}",
+                get("title"),
+                get("explanation"),
+                get("wrong_code"),
+                get("correct_code"),
+                get("correct_usage_table"),
+            ));
+        }
+    }
+
+
 
     // 6. Call DeepSeek
     let optimized_code =
@@ -777,18 +836,31 @@ async fn ingest_local_files(
             };
 
             // Extract core fields exactly once to clean up database injection
+            let title = meta["title"].as_str().unwrap_or("title");
             let category = meta["category"].as_str().unwrap_or("general");
             let triggers = meta["trigger_patterns"].to_string();
             let sol_before = meta["solidity_before"].as_str().or(meta["pattern_before"].as_str()).unwrap_or("");
 
-            // Format embedding string
-            let embed_text = format!(
-                "TOKEN_STANDARD_NAMESPACE: {}\n// Target: {}\n// Triggers: {}\n{}",
-                category.to_uppercase(),
-                meta["title"].as_str().unwrap_or(""),
-                triggers,
-                sol_before
-            );
+            let entry_type = meta["type"].as_str().unwrap_or("pattern");
+
+            let embed_text = if entry_type == "antipattern" {
+                let wrong = meta["wrong_code"].as_str().unwrap_or("");
+                let why = meta["why_wrong"].as_str().unwrap_or("");
+                format!(
+                    "TOKEN_STANDARD_NAMESPACE: {}\n\
+                    // Antipattern to avoid: {}\n\
+                    // Triggers: {}\n\
+                    // Wrong code: {}\n\
+                    // Why wrong: {}",
+                    category.to_uppercase(), title, triggers, wrong, why
+                )
+            } else {
+                // existing pattern embed text
+                format!(
+                    "TOKEN_STANDARD_NAMESPACE: {}\n// Optimization: {}\n// Keywords: {}\n{}",
+                    category.to_uppercase(), title, triggers, sol_before
+                )
+            };
 
             let vector = match get_kilo_embedding(&state.http, &embed_text, &state.kilo_api_key).await {
                 Ok(v) => v,
@@ -806,7 +878,7 @@ async fn ingest_local_files(
                 TursoArg::Text(id.clone()),
                 TursoArg::Text(category.to_string()),
                 TursoArg::Text(meta["version"].as_str().unwrap_or("1.0").to_string()),
-                TursoArg::Text(meta["title"].as_str().unwrap_or("").to_string()),
+                TursoArg::Text(title.to_string()),
                 TursoArg::Text(meta["source"].as_str().unwrap_or("").to_string()),
                 TursoArg::Text(meta["source_file"].as_str().unwrap_or("").to_string()),
                 TursoArg::Text(meta["difficulty"].as_str().unwrap_or("medium").to_string()),

@@ -1,0 +1,34 @@
+{
+    "id": "ANTIPATTERN_HARDCODED_SLOT",
+    "type": "antipattern",
+    "category": "storage",
+    "version": "1.0",
+    "title": "Using hardcoded sload(0) or sload(1) for named storage variables",
+    "source": "gaslite",
+
+    "trigger_patterns": [
+    "load token address from storage",
+    "load owner from storage assembly",
+    "sload slot 0 for address variable",
+    "hardcoded storage slot number",
+    "named variable storage access assembly",
+    "contract state variable in assembly block"
+    ],
+
+    "wrong_code": "// WRONG — assumes token is slot 0 and owner is slot 1\n// breaks immediately if storage layout changes\nassembly {\n    let tokenAddr := sload(0)  // fragile\n    let ownerAddr := sload(1)  // fragile\n}",
+    "correct_code": "// CORRECT option A — use Solidity's .slot syntax in inline assembly\n// valid when the variable is in scope\nassembly {\n    let tokenAddr := sload(token.slot)\n    let ownerAddr := sload(owner.slot)\n}\n\n// CORRECT option B — for immutables, use immutable keyword\n// saves 200+ gas per read vs storage\naddress public immutable token;\naddress public immutable owner;\n// Then in assembly: no sload needed, reads from bytecode directly",
+    "explanation": "Solidity assigns storage slots based on declaration order, inheritance, and packing. Hardcoding slot numbers like sload(0) only works if token is the very first declared variable with no inheritance. Adding a single inherited contract or reordering declarations silently breaks the slot assumptions, causing reads from wrong slots with no compilation error.",
+
+    "why_wrong": "Storage layout is determined by the compiler and can change silently when: (1) base contracts are added or reordered, (2) new variables are inserted before existing ones, (3) struct packing changes. Hardcoded slot numbers create invisible time bombs that survive compilation and only fail at runtime.",
+      "correct_usage_table": {
+
+  },
+    "better_approach": "For frequently read addresses that never change after deployment, use 'immutable' — this stores the value in contract bytecode instead of storage, saving one SLOAD (800 gas on Mantle) per read with zero risk of slot collision.",
+
+    "immutable_example": "// Most gas efficient for addresses set in constructor\ncontract SimpleVault {\n    address public immutable token;  // reads from bytecode, not storage\n    address public immutable owner;\n    \n    constructor(address _token) {\n        token = _token;\n        owner = msg.sender;\n    }\n    // In assembly: no sload() needed at all\n}",
+
+    "gas_impact": "Using immutable saves 800 gas per read on Mantle vs sload. Using .slot syntax has zero gas impact but is safe.",
+    "risk_level": "critical",
+    "mantle_specific": true,
+    "evm_version": "paris"
+}

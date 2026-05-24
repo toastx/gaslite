@@ -1,0 +1,44 @@
+{
+  "id": "ANTIPATTERN_STATICCALL_STATE_CHANGE",
+  "type": "antipattern",
+  "category": "calls",
+  "version": "1.0",
+  "title": "Using staticcall for state-changing ERC20 functions (transfer, transferFrom, approve)",
+  "source": "gaslite_error_corpus",
+
+  "trigger_patterns": [
+    "transferFrom assembly external call",
+    "transfer assembly external call",
+    "approve assembly external call",
+    "erc20 call in assembly",
+    "token transfer assembly call opcode",
+    "call token contract assembly"
+  ],
+
+  "wrong_code": "// WRONG — staticcall cannot modify state\n// transferFrom writes to storage — will ALWAYS revert\nlet success := staticcall(\n    gas(),\n    tokenAddr,\n    0x00,   // input offset\n    0x64,   // input size\n    0x00,   // output offset  \n    0x20    // output size\n)",
+
+  "correct_code": "// CORRECT — use call() for any state-changing function\n// transferFrom, transfer, approve all write to storage\nlet success := call(\n    gas(),\n    tokenAddr,\n    0,      // ETH value (0 for token calls)\n    0x00,   // input offset\n    0x64,   // input size\n    0x00,   // output offset\n    0x20    // output size\n)\n\n// staticcall is ONLY correct for pure view functions:\n// balanceOf, allowance, totalSupply, name, symbol, decimals\nlet balance := staticcall(\n    gas(),\n    tokenAddr,\n    0x00,\n    0x24,\n    0x00,\n    0x20\n)",
+
+  "explanation": "staticcall is EIP-214 — it executes the target code in a read-only context where any SSTORE, LOG, CREATE, SELFDESTRUCT, or CALL with value causes an immediate revert. ERC20 transfer() and transferFrom() both write balances to storage via SSTORE. staticcall will revert the moment the token contract attempts any state modification, making the transfer appear to fail even on a valid token with sufficient balance.",
+
+  "why_wrong": "Every transferFrom call will revert silently — success will be 0. The vault or router contract will think the transfer failed and revert itself with TransferFailed(), even though the user had sufficient balance and allowance. This is a complete loss of functionality.",
+
+  "correct_usage_table": {
+    "transfer(address,uint256)": "call()",
+    "transferFrom(address,address,uint256)": "call()",
+    "approve(address,uint256)": "call()",
+    "mint(address,uint256)": "call()",
+    "burn(address,uint256)": "call()",
+    "balanceOf(address)": "staticcall()",
+    "allowance(address,address)": "staticcall()",
+    "totalSupply()": "staticcall()",
+    "decimals()": "staticcall()",
+    "name()": "staticcall()",
+    "symbol()": "staticcall()"
+  },
+
+  "gas_impact": "staticcall costs slightly less gas than call when it succeeds, but it never succeeds for state-changing functions — the gas is wasted on a guaranteed revert",
+  "risk_level": "critical",
+  "mantle_specific": false,
+  "evm_version": "paris"
+}

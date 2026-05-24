@@ -1,0 +1,44 @@
+{
+  "id": "ANTIPATTERN_PANIC_SELECTOR",
+  "type": "antipattern",
+  "category": "control_flow",
+  "version": "1.0",
+  "title": "Using Panic selector (0x4e487b71) instead of custom error selector",
+  "source": "gaslite_error_corpus",
+
+  "trigger_patterns": [
+    "insufficient balance revert",
+    "arithmetic underflow check assembly",
+    "balance less than amount revert",
+    "allowance exceeded revert",
+    "revert if lt balance amount",
+    "revert if gt amount balance",
+    "custom error for insufficient funds"
+  ],
+
+  "wrong_code": "// WRONG — 0x4e487b71 is Solidity's internal Panic selector\n// used by the compiler for divide-by-zero, array OOB etc.\n// NEVER use this manually\nif lt(senderBalance, amount) {\n    mstore(0x00, 0x4e487b71) // Panic(uint256) — WRONG\n    revert(0x1c, 0x04)\n}",
+
+  "correct_code": "// CORRECT — use keccak256-derived custom error selectors\nif lt(senderBalance, amount) {\n    mstore(0x00, 0xf4d678b8) // InsufficientBalance()\n    revert(0x1c, 0x04)\n}\n\n// For allowance checks:\nif lt(allowance, amount) {\n    mstore(0x00, 0x13be252b) // InsufficientAllowance()\n    revert(0x1c, 0x04)\n}",
+
+  "explanation": "0x4e487b71 is keccak256('Panic(uint256)') — Solidity's reserved selector for compiler-generated panics like division by zero, array index out of bounds, and arithmetic overflow. Using it manually confuses debuggers, block explorers, and client-side error decoders which expect a uint256 parameter after the selector. Custom errors should use their own keccak256-derived 4-byte selectors.",
+
+  "why_wrong": "Block explorers and SDKs treat 0x4e487b71 as a Panic and try to decode a uint256 parameter that isn't there. Error monitoring tools misclassify the revert. Auditors flag it as a code smell. It also conflicts if Solidity ever generates a real Panic in the same function.",
+
+  "correct_selectors": {
+    "InsufficientBalance()": "0xf4d678b8",
+    "InsufficientAllowance()": "0x13be252b",
+    "TransferFailed()": "0x90b8ec18",
+    "ETHTransferFailed()": "0xb12d13eb",
+    "NotOwner()": "0x30cd7471",
+    "TokenDoesNotExist()": "0xceea21b6",
+    "TokenAlreadyExists()": "0xc991cbb1",
+    "Unauthorized()": "0x82b42900",
+    "ZeroAddress()": "0xd92e233d",
+    "AccountBalanceOverflow()": "0xf1354d80"
+  },
+
+  "gas_impact": "Zero gas difference — this is a correctness and tooling bug not a gas bug",
+  "risk_level": "critical",
+  "mantle_specific": false,
+  "evm_version": "paris"
+}
