@@ -368,7 +368,7 @@ async fn optimize_contract(
     );
 
     // 2. Embed incoming clean string
-    let query_vec = get_embedding(State(state),&query_text.as_str())
+    let query_vec = get_embedding(State(state.clone()),&query_text.as_str())
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
@@ -534,8 +534,13 @@ async fn optimize_contract(
         }
     }
 
-
-
+    let context = format!(
+        "follow {} and dont follow {}",
+        pattern_contexts.join("\n\n---\n\n"),
+        anti_pattern_contexts.join("\n\n---\n\n")
+    );
+    
+    
     // 6. Call DeepSeek
     let optimized_code =
         call_deepseek(&state.http, &payload.contract_source, &context, &state.deepseek_api_key)
