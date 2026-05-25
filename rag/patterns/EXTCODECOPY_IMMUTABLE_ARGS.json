@@ -1,0 +1,29 @@
+{
+  "id": "EXTCODECOPY_IMMUTABLE_ARGS",
+  "title": "Read clone/proxy immutable arguments from bytecode using extcodecopy",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "ERC6551 token() function",
+    "read immutable args from clone bytecode",
+    "extcodecopy for cloned contract data",
+    "minimal proxy appended args"
+  ],
+
+  "description": "ERC6551 clones (and other minimal-proxy patterns) append immutable arguments at the tail of the runtime bytecode. extcodecopy(address, destOffset, codeOffset, len) copies these tail bytes into memory cheaply — far cheaper than a storage read. For ERC6551, the layout at offset 0x4d is (chainId, tokenContract, tokenId), 96 bytes total. No SLOAD, no constructor parameter, just a bytecode read.",
+
+  "pattern_before": "// Storage-based — costs SLOAD (2100 cold)\nuint256 public chainId;\naddress public tokenContract;\nuint256 public tokenId;\nfunction token() public view returns (uint256, address, uint256) {\n    return (chainId, tokenContract, tokenId);\n}",
+
+  "pattern_after": "function token() public view returns (uint256 chainId, address tokenContract, uint256 tokenId) {\n    assembly {\n        let m := mload(0x40)\n        extcodecopy(address(), 0x00, 0x4d, 0x60) // 96 bytes from offset 0x4d\n        chainId := mload(0x00)\n        tokenContract := mload(0x20)\n        tokenId := mload(0x40)\n        mstore(0x40, m)\n    }\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "high",
+
+  "when_to_apply": "Reading immutable args from minimal clones (ERC6551, LibClone) where the arguments are appended to the runtime bytecode",
+  "when_not_to_apply": "Regular contracts where immutables are baked into bytecode (use immutable keyword), or contracts that aren't deployed as appended-arg clones",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

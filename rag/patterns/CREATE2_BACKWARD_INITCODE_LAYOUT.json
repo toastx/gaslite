@@ -1,0 +1,29 @@
+{
+  "id": "CREATE2_BACKWARD_INITCODE_LAYOUT",
+  "title": "Construct ERC6551/clone init code in memory by laying out fields backwards from a chosen pivot offset",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "ERC6551 initCode construction",
+    "minimal proxy init code in assembly",
+    "backward layout for keccak256 over init code",
+    "0x3d60ad80600a3d3981f3 prefix"
+  ],
+
+  "description": "ERC6551 clone init code embeds the implementation address, salt, chainId, tokenContract, tokenId at fixed offsets. Solady writes these fields backwards starting from the highest offset (tokenId at 0xa3) so that simpler mstore writes can overlap and overwrite the head bytes with the canonical proxy prefix 0x3d60ad80600a3d3981f3363d3d373d3d3d363d73 last. Then keccak256(start, 0xb7) hashes exactly the init code. Backwards layout avoids the need to compute exact non-overlapping offsets.",
+
+  "pattern_before": "// Forward layout requires careful non-overlapping offsets\nbytes memory init = abi.encodePacked(\n    hex\"3d60ad80600a3d3981f3363d3d373d3d3d363d73\",\n    implementation,\n    hex\"5af43d82803e903d91602b57fd5bf3\",\n    salt, chainId, tokenContract, tokenId\n);",
+
+  "pattern_after": "assembly {\n    let m := mload(0x40)\n    // Layout backwards — overlap is intentional, last writes win on the head\n    mstore(add(m, 0xa3), tokenId)\n    mstore(add(m, 0x83), shr(96, shl(96, tokenContract)))\n    mstore(add(m, 0x63), chainId)\n    mstore(add(m, 0x43), salt)\n    mstore(add(m, 0x23), 0x5af43d82803e903d91602b57fd5bf3)\n    mstore(add(m, 0x14), implementation)\n    mstore(m, 0x3d60ad80600a3d3981f3363d3d373d3d3d363d73)\n    let hash := keccak256(add(m, 0x0c), 0xb7)\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Computing CREATE2 addresses for ERC6551 clones, minimal proxies with appended args (LibClone), or any deterministic deployment with structured init code",
+  "when_not_to_apply": "General-purpose init code construction where backwards layout obscures intent",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

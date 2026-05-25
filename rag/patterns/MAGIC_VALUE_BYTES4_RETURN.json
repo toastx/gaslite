@@ -1,0 +1,30 @@
+{
+  "id": "MAGIC_VALUE_BYTES4_RETURN",
+  "title": "Return bytes4 magic value via shl(224, ...) selector encoding for ERC1271/ERC721/ERC1155 callbacks",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "ERC1271 isValidSignature return",
+    "ERC721 onERC721Received return",
+    "ERC1155 onERC1155Received return",
+    "bytes4 magic value return",
+    "isValidSigner ERC6551 return"
+  ],
+
+  "description": "Many EIPs require returning a bytes4 magic value: ERC1271 returns 0x1626ba7e, ERC6551 returns 0x523e3260, ERC721 returns 0x150b7a02, ERC1155 returns 0xf23a6e61/0xbc197c81. shl(224, value) places the 4-byte value in the top of a 32-byte word — the canonical right-padded ABI encoding for bytes4. Branchless encoding: shl(224, mul(magic, success)) returns magic on success, 0 on failure. Or shl(224, or(magic, sub(0, iszero(success)))) returns magic on success, 0xffffffff on failure (ERC1271 convention).",
+
+  "pattern_before": "// Conditional return\nif (success) return 0x1626ba7e;\nelse return 0xffffffff;",
+
+  "pattern_after": "// Branchless via shl(224)\nassembly {\n    // success ? 0x1626ba7e : 0xffffffff\n    result := shl(224, or(0x1626ba7e, sub(0, iszero(success))))\n}\n// Alternative: success ? magic : 0\nassembly {\n    result := shl(224, mul(0x523e3260, iszero(iszero(isValid))))\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any callback returning bytes4 magic value (ERC1271, ERC721 receiver, ERC1155 receiver, ERC6551 isValidSigner)",
+  "when_not_to_apply": "Functions returning multiple values or non-bytes4 returns",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

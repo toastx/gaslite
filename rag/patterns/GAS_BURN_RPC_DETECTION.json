@@ -1,0 +1,30 @@
+{
+  "id": "GAS_BURN_RPC_DETECTION",
+  "title": "Burn gas via recursive staticcall to enforce that ERC1271 RPC sign-ins cannot be replayed on-chain",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "ERC1271 RPC sign-in",
+    "off-chain signature validation only",
+    "tx.gasprice == 0 detection",
+    "burn gas to prevent on-chain replay",
+    "basefee precompile lookup"
+  ],
+
+  "description": "Some ERC1271 implementations want to allow easy off-chain sign-ins (RPC eth_call) without nested EIP-712 wrapping, while preventing the same signature from being replayed on-chain. The heuristic: tx.gasprice == 0 likely means RPC. To make the on-chain attack expensive, burn nearly all available gas via a recursive staticcall consuming ~gaslimit gas — no valid transaction can afford this, but RPC calls typically have higher gas budgets. Also queries the basefee contract to confirm we're not in an unusual eth_call with non-zero gasprice manipulation.",
+
+  "pattern_before": "// No protection — signature could be reused on-chain\nif (tx.gasprice == 0) {\n    return _validateSimple(hash, sig);\n}",
+
+  "pattern_after": "if (tx.gasprice == 0) {\n    assembly {\n        let b := 0x000000000000378eDCD5B5B0A24f5342d8C10485 // basefee contract\n        pop(staticcall(0xffff, b, codesize(), 0, 0, 0x20))\n        if iszero(mload(0)) { // gasprice < basefee — likely RPC\n            let gasToBurn := or(add(0xffff, gaslimit()), gaslimit())\n            if lt(gas(), gasToBurn) { invalid() }\n            // recursive staticcall burns all gas — only RPC has budget\n            pop(staticcall(gasToBurn, address(), 0x1c, 0x64, 0, 0))\n        }\n    }\n    return _validateSimple(hash, sig);\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "ERC1271 implementations that allow simple RPC-only sign-in flows but must prevent on-chain replay",
+  "when_not_to_apply": "Standard signature validation, on-chain meta-transactions, any flow where the signature should be valid both off-chain and on-chain",
+
+  "risk_level": "high",
+  "mantle_specific": false,
+  "source": "solady"
+}

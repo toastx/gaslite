@@ -1,0 +1,29 @@
+{
+  "id": "PACKED_FLAG_BIT0",
+  "title": "Pack a boolean flag in bit 0 and a uint255 value in bits 1..255 of one storage slot",
+  "category": "storage",
+
+  "trigger_patterns": [
+    "done flag plus timestamp packing",
+    "operation state packed slot",
+    "executed bit plus value",
+    "shl(1, value) for packed flag"
+  ],
+
+  "description": "When a boolean and a near-uint256 value need to share a single slot, pack them as: slot = (value << 1) | flag. Reading: flag = slot & 1, value = slot >> 1. Writing the flag without disturbing the value: sstore(slot, or(1, sload(slot))). This pattern is used in Solady Timelock for the (done, readyTimestamp) storage layout — readyTimestamp uses 255 bits (bounded to 2^254-1) so done can occupy bit 0.",
+
+  "pattern_before": "// Two slots — wasteful\nstruct Operation {\n    bool done;\n    uint256 readyTimestamp;\n}\nmapping(bytes32 => Operation) ops;",
+
+  "pattern_after": "// One slot: [readyTimestamp(255) | done(1)]\nfunction propose(bytes32 id, uint256 ts) internal {\n    assembly {\n        let s := /* derived slot */\n        sstore(s, shl(1, ts)) // done=0, ts in upper bits\n    }\n}\nfunction markDone(bytes32 id) internal {\n    assembly {\n        let s := /* derived slot */\n        sstore(s, or(1, sload(s))) // set bit 0, preserve ts\n    }\n}\nfunction read(bytes32 id) internal view returns (bool done, uint256 ts) {\n    assembly {\n        let p := sload(/* slot */)\n        done := and(1, p)\n        ts := shr(1, p)\n    }\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "high",
+
+  "when_to_apply": "Storage layouts pairing a boolean state with a value bounded below 2^255 (timestamps, indices, role bitmaps)",
+  "when_not_to_apply": "When the value may exceed 2^254-1, or when value and flag are updated separately at high frequency (each write rewrites the full slot)",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

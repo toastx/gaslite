@@ -1,0 +1,29 @@
+{
+  "id": "STORAGE_SLOT_GUARD",
+  "title": "Snapshot critical storage slots before delegatecall and verify they are unchanged after",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "delegateExecute storage guard",
+    "ensure owner slot unchanged after delegatecall",
+    "implementation slot tamper check",
+    "storage integrity check around delegatecall"
+  ],
+
+  "description": "When executing a delegatecall to an arbitrary address (e.g. ERC4337 delegateExecute), the called code can modify ANY storage slot of this contract. To preserve invariants like ownership and implementation address, snapshot the critical slots before, then compare after — revert if any have been mutated. Cheap (just SLOAD before/after) and prevents catastrophic takeover via malicious delegate.",
+
+  "pattern_before": "// No guard — delegatecall can overwrite owner\nfunction delegateExecute(address d, bytes calldata data) external onlyOwner {\n    (bool ok, ) = d.delegatecall(data);\n    require(ok);\n}",
+
+  "pattern_after": "modifier delegateExecuteGuard() {\n    bytes32 ownerSlotValue;\n    bytes32 implSlotValue;\n    assembly {\n        implSlotValue := sload(_ERC1967_IMPLEMENTATION_SLOT)\n        ownerSlotValue := sload(_OWNER_SLOT)\n    }\n    _;\n    assembly {\n        if iszero(and(\n            eq(implSlotValue, sload(_ERC1967_IMPLEMENTATION_SLOT)),\n            eq(ownerSlotValue, sload(_OWNER_SLOT))\n        )) { revert(codesize(), 0x00) }\n    }\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Any function exposing arbitrary delegatecall to external addresses, especially in upgradeable accounts (ERC4337, ERC6551)",
+  "when_not_to_apply": "Plain external calls (call) where delegatecall semantics don't apply, or fully trusted internal libraries",
+
+  "risk_level": "high",
+  "mantle_specific": false,
+  "source": "solady"
+}

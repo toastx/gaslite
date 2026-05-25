@@ -1,0 +1,46 @@
+{
+  "id": "ERC7821_EXECUTE_BATCH",
+  "category": "Accounts",
+  "version": "1.0",
+  "title": "ERC7821 minimal batch executor with mode dispatch, optional opData, and batch-of-batches recursion",
+  "source": "solady",
+  "source_file": "solady/src/accounts/ERC7821.sol",
+  "difficulty": "hard",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC7821 batch executor",
+    "EIP-7579 mode dispatch",
+    "batch of batches execution",
+    "opData optional authentication",
+    "EIP-7702 batched calls"
+  ],
+
+  "solidity_before": "struct Call { address to; uint256 value; bytes data; }\nfunction batchExecute(Call[] calldata calls) external {\n    require(msg.sender == address(this));\n    for (uint i; i < calls.length; ++i) {\n        (bool ok, ) = calls[i].to.call{value: calls[i].value}(calls[i].data);\n        require(ok);\n    }\n}",
+
+  "yul_optimized": "function execute(bytes32 mode, bytes calldata executionData) public payable virtual {\n    uint256 id = _executionModeId(mode);\n    if (id == 3) return _executeBatchOfBatches(mode, executionData);\n    Call[] calldata calls;\n    bytes calldata opData;\n    assembly {\n        if iszero(id) {\n            mstore(0x00, 0x7f181275) // UnsupportedExecutionMode()\n            revert(0x1c, 0x04)\n        }\n        opData.length := 0\n        let o := add(executionData.offset, calldataload(executionData.offset))\n        calls.offset := add(o, 0x20)\n        calls.length := calldataload(o)\n        // Mode 2 supports opData if executionData has room for the second offset\n        if gt(eq(id, 2), gt(0x40, calldataload(executionData.offset))) {\n            let q := add(executionData.offset, calldataload(add(0x20, executionData.offset)))\n            opData.offset := add(q, 0x20)\n            opData.length := calldataload(q)\n        }\n    }\n    _execute(mode, executionData, calls, opData);\n}\n\nfunction _executionModeId(bytes32 mode) internal view virtual returns (uint256 id) {\n    assembly {\n        let m := and(shr(mul(22, 8), mode), 0xffff00000000ffffffff)\n        id := eq(m, 0x01000000000000000000)\n        id := or(shl(1, eq(m, 0x01000000000078210001)), id)\n        id := or(mul(3, eq(m, 0x01000000000078210002)), id)\n    }\n}\n\nfunction _execute(address to, uint256 value, bytes calldata data, bytes32 extraData)\n    internal virtual\n{\n    assembly {\n        extraData := extraData // silence warning\n        let m := mload(0x40)\n        calldatacopy(m, data.offset, data.length)\n        if iszero(call(gas(), to, value, m, data.length, codesize(), 0)) {\n            returndatacopy(m, 0, returndatasize())\n            revert(m, returndatasize())\n        }\n    }\n}",
+
+  "patterns_used": [
+    "EXTERNAL_CALL_RETURN_BUBBLING",
+    "BATCH_ARRAY_SHIFT_ITERATION",
+    "CUSTOM_ERROR_4BYTE",
+    "CODESIZE_LOG4"
+  ],
+
+  "explanation": "Three layers: (1) Mode dispatch packs the EIP-7579 mode bytes [0..1] (0x0100) and [6..9] (0x00000000 / 0x78210001 / 0x78210002) into a uint id of 1, 2, or 3 via three eq() checks combined with OR shifts. id=0 means invalid mode → revert. (2) Optional opData detection: if id==2 and the executionData offset leaves room for a second offset (the head word > 0x40), opData is decoded from offsets 0x20 onwards. The trick `gt(eq(id, 2), gt(0x40, head))` is true only when both id==2 AND head > 0x40 — branchless filter. (3) Batch-of-batches (id=3) recursively calls execute() with mode XOR'd to flip the trailing 0002 → 0001, so each inner batch is processed as a regular opData-supporting batch. Each recursive call gets its own opData scope, useful for separately-signed sub-batches in EIP-7702 use cases. (4) Per-call execution uses the standard call + bubble revert pattern; results are intentionally NOT collected, keeping the executor mode minimal.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per batch execution",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "medium",
+  "when_to_apply": "EIP-7702 batchers, smart accounts implementing the ERC7821 minimal-executor interface, batch-of-batches multi-signer flows",
+  "when_not_to_apply": "Accounts requiring per-call result collection (use ERC4337 executeBatch instead), strict-mode executors that must reject unknown modes more loudly",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

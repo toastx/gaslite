@@ -1,0 +1,48 @@
+{
+  "id": "EIP7702_PROXY_FALLBACK",
+  "category": "Accounts",
+  "version": "1.0",
+  "title": "EIP7702 relay proxy fallback with admin workflow, EOA delegatecall forwarding, and transient init request",
+  "source": "solady",
+  "source_file": "solady/src/accounts/EIP7702Proxy.sol",
+  "difficulty": "extreme",
+  "mantle_specific": false,
+  "evm_version": "cancun",
+
+  "trigger_patterns": [
+    "EIP7702 relay proxy",
+    "upgradeable EIP7702 account without redelegation",
+    "ERC1967 proxy with admin and EOA workflows",
+    "transient storage proxy initialization",
+    "etherscan proxy detection support"
+  ],
+
+  "solidity_before": "// Naive UUPS+1967 proxy doesn't work for EIP7702 — EOA delegations need a relay\n// that distinguishes self-calls (admin / etherscan) from EOA-side delegatecalls.\ncontract NaiveProxy {\n    address public implementation;\n    fallback() external payable {\n        (bool ok, bytes memory r) = implementation.delegatecall(msg.data);\n        if (!ok) assembly { revert(add(r, 32), mload(r)) }\n        assembly { return(add(r, 32), mload(r)) }\n    }\n}",
+
+  "yul_optimized": "fallback() external payable virtual {\n    uint256 s = __self;\n    uint256 defaultImpl = _defaultImplementation;\n    bytes32 implSlot = _ERC1967_IMPLEMENTATION_SLOT;\n    uint256 addrMask = (~msg.data.length) >> 96;\n    assembly {\n        mstore(0x40, 1)\n        // Calls landing on the proxy itself: implementation()/admin()/upgrade()/changeAdmin()\n        if iszero(xor(address(), s)) {\n            if iszero(gt(calldatasize(), 1)) {\n                mstore(0x00, and(addrMask, sload(implSlot)))\n                return(0x00, 0x20)\n            }\n            let fnSel := shr(224, calldataload(0))\n            if eq(0x5c60da1b, fnSel) { // implementation()\n                mstore(0x00, and(addrMask, sload(implSlot)))\n                return(0x00, 0x20)\n            }\n            let adminSlot := _ERC1967_ADMIN_SLOT\n            if eq(0xf851a440, fnSel) { // admin()\n                mstore(0x00, sload(adminSlot))\n                return(0x00, 0x20)\n            }\n            if eq(caller(), sload(adminSlot)) {\n                let addrSlot := or(\n                    mul(eq(0x8f283970, fnSel), adminSlot),     // changeAdmin\n                    mul(eq(0x0900f010, fnSel), implSlot)        // upgrade\n                )\n                if addrSlot {\n                    sstore(addrSlot, and(addrMask, calldataload(0x04)))\n                    return(0x40, 0x20)\n                }\n            }\n            revert(0x00, 0x00)\n        }\n        // Calls landing on the EOA delegated to this proxy\n        let implementation := and(addrMask, sload(implSlot))\n        if eq(1, calldatasize()) {\n            // Special read-implementation workflow used by Etherscan\n            if iszero(implementation) { implementation := defaultImpl }\n            if iszero(implementation) {\n                if staticcall(gas(), s, 0, 0, 0, 0x20) {\n                    return(0x00, returndatasize())\n                }\n                revert(0, 0)\n            }\n            mstore(0x00, implementation)\n            return(0x00, 0x20)\n        }\n        calldatacopy(0x00, 0x00, calldatasize())\n        if iszero(implementation) {\n            implementation := defaultImpl\n            if iszero(implementation) {\n                // Fetch implementation from proxy AND delegatecall — right-to-left evaluation\n                if iszero(and(\n                    delegatecall(gas(), mload(calldatasize()), 0, calldatasize(), 0, 0),\n                    staticcall(gas(), s, 0, 0, calldatasize(), 0x20)\n                )) {\n                    returndatacopy(0, 0, returndatasize())\n                    revert(0, returndatasize())\n                }\n                // Honor transient init request from delegation\n                if tload(_EIP7702_PROXY_DELEGATION_INITIALIZATION_REQUEST_SLOT) {\n                    sstore(implSlot, or(and(not(addrMask), sload(implSlot)), mload(calldatasize())))\n                    tstore(_EIP7702_PROXY_DELEGATION_INITIALIZATION_REQUEST_SLOT, 0)\n                }\n                returndatacopy(0, 0, returndatasize())\n                return(0x00, returndatasize())\n            }\n        }\n        if iszero(delegatecall(gas(), implementation, 0, calldatasize(), 0, 0)) {\n            returndatacopy(0, 0, returndatasize())\n            revert(0, returndatasize())\n        }\n        returndatacopy(0, 0, returndatasize())\n        return(0x00, returndatasize())\n    }\n}",
+
+  "patterns_used": [
+    "DELEGATECALL_BUBBLE_RETURNDATA",
+    "TRANSIENT_STORAGE_TLOAD_TSTORE",
+    "CALLDATALOAD_SHR_SELECTOR",
+    "YUL_RIGHT_TO_LEFT_EVALUATION",
+    "RETURNDATACOPY_OOG_REVERT",
+    "EXTERNAL_CALL_RETURN_BUBBLING"
+  ],
+
+  "explanation": "Single fallback handles four execution modes: (1) calls to the proxy contract itself for implementation()/admin()/upgrade()/changeAdmin (distinguished by address() == __self), with selector dispatch via shr(224, calldataload(0)); (2) zero-arg read of implementation from the EOA side returning the cached or default impl; (3) standard delegatecall forwarding from the EOA to the impl, bubbling up returndata for both success and revert; (4) initialization workflow when no impl is set yet, fetching the default from the proxy via staticcall AND running delegatecall in the same and() expression — Yul's right-to-left evaluation means staticcall runs first and writes the impl address to memory, then delegatecall reads it via mload(calldatasize()). Transient storage signals from the delegation cause sstore to bake the impl into ERC1967 storage. Preserves upper 96 bits of the impl slot for future use.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per call through proxy",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "high",
+  "when_to_apply": "EIP7702 EOAs that delegate to a relay proxy for upgradeability without re-signing the 7702 authorization on each upgrade",
+  "when_not_to_apply": "Pre-Cancun chains (no transient storage), simple non-upgradeable EIP7702 delegations",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

@@ -1,0 +1,29 @@
+{
+  "id": "PACKED_SELECTOR_ARG_MSTORE",
+  "title": "Pack a 4-byte function selector and one 32-byte argument into a single 16-byte mstore for compact calldata layout",
+  "category": "memory",
+
+  "trigger_patterns": [
+    "mstore selector with right-padded zeros",
+    "0x205c2878000000000000000000000000",
+    "selector and argument layout assembly",
+    "withdrawTo packed call construction"
+  ],
+
+  "description": "When constructing calldata for an external call with one or two arguments, write the selector left-aligned in a 16-byte word with trailing zero padding (e.g. 0x205c2878000000000000000000000000 for withdrawTo). Then write arguments at subsequent offsets. The call(..., 0x10, 0x44, ...) reads from offset 0x10 for 0x44 bytes — exactly: 4-byte selector + 32-byte arg1 + 32-byte arg2. Avoids the standard right-align-and-shift dance for the selector.",
+
+  "pattern_before": "// Standard right-aligned selector\nmstore(0x00, 0x205c2878) // selector at bytes [28..32]\nmstore(0x20, to)\nmstore(0x40, amount)\ncall(gas(), ep, 0, 0x1c, 0x44, ...) // start at 0x1c = 28",
+
+  "pattern_after": "// Left-aligned selector packed with leading zeros\nmstore(0x14, to)     // address at [0x14..0x34]\nmstore(0x34, amount) // amount at [0x34..0x54]\nmstore(0x00, 0x205c2878000000000000000000000000) // selector at [0x10..0x14], zeros from [0..0x10]\ncall(gas(), ep, 0, 0x10, 0x44, ...)\nmstore(0x34, 0) // restore overwritten free pointer slot",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "External calls with 1-2 arguments where the calldata layout fits cleanly in scratch space, especially when the caller wants to keep all data in 0x00-0x60 region",
+  "when_not_to_apply": "Calls with dynamic-length arguments or many parameters",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

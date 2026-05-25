@@ -1,0 +1,43 @@
+{
+  "id": "ERC1271_IS_VALID_SIGNATURE",
+  "category": "Accounts",
+  "version": "1.0",
+  "title": "ERC1271 isValidSignature with nested EIP-712 (ERC7739) and short-circuit detection",
+  "source": "solady",
+  "source_file": "solady/src/accounts/ERC1271.sol",
+  "difficulty": "hard",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC1271 isValidSignature",
+    "ERC7739 nested EIP-712 detection",
+    "smart account signer validation",
+    "0x77390001 detection sentinel"
+  ],
+
+  "solidity_before": "function isValidSignature(bytes32 hash, bytes memory sig) public view returns (bytes4) {\n    address recovered = ECDSA.recover(hash, sig);\n    if (recovered == owner()) return 0x1626ba7e;\n    return 0xffffffff;\n}",
+
+  "yul_optimized": "function isValidSignature(bytes32 hash, bytes calldata signature)\n    public view virtual returns (bytes4 result)\n{\n    unchecked {\n        // ERC7739 detection: empty sig + magic hash returns 0x77390001\n        if (signature.length == 0) {\n            if (uint256(hash) == ~signature.length / 0xffff * 0x7739) return 0x77390001;\n        }\n    }\n    bool success = _erc1271IsValidSignature(hash, _erc1271UnwrapSignature(signature));\n    assembly {\n        // success ? 0x1626ba7e : 0xffffffff — branchless via shl(224)\n        result := shl(224, or(0x1626ba7e, sub(0, iszero(success))))\n    }\n}",
+
+  "patterns_used": [
+    "MAGIC_VALUE_BYTES4_RETURN",
+    "BOOLEAN_NORMALIZE"
+  ],
+
+  "explanation": "Two key optimizations: (1) ERC7739 auto-detection — if signature is empty and hash equals the magic 0x7739...7739 sentinel, return 0x77390001 to signal nested EIP-712 support without a separate function. ~0 / 0xffff * 0x7739 produces the pattern in compiler-friendly bytecode. (2) Branchless return value: shl(224, or(0x1626ba7e, sub(0, iszero(success)))) returns 0x1626ba7e on success and 0xffffffff on failure. sub(0, iszero(success)) is 0 when success=true and ~0 (all bits set) when success=false; or-ing with the magic preserves it when bits are 0 and saturates to 0xffffffff otherwise. shl(224) places the bytes4 in the canonical right-padded position for return.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per signature check",
+  "gas_estimate": "medium",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "Any ERC1271-compliant smart account that wants to advertise ERC7739 support and avoid branching on the success path",
+  "when_not_to_apply": "Accounts that need to return non-standard error codes or perform additional logging on signature failure",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

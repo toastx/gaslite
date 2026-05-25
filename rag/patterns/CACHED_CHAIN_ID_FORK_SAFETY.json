@@ -1,0 +1,29 @@
+{
+  "id": "CACHED_CHAIN_ID_FORK_SAFETY",
+  "title": "Cache block.chainid at deployment in immutable; compare on read to detect hard forks",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "cached chain id immutable",
+    "block.chainid hard fork detection",
+    "ERC6551 owner across forks",
+    "chainId immutable comparison"
+  ],
+
+  "description": "ERC6551 token-bound accounts read tokenContract.ownerOf(tokenId) from the chain identified by chainId baked into bytecode. After a hard fork, both sides of the fork inherit the bytecode but block.chainid differs. Caching block.chainid at deployment in an immutable lets the account check at runtime: if cachedChainId == block.chainid, do the lookup; else return address(0) so the wrong-fork copy is harmless. Cheaper than always doing the staticcall and getting wrong data.",
+
+  "pattern_before": "// No fork safety — wrong fork's account would query the right token contract\nfunction owner() public view returns (address) {\n    return IERC721(tokenContract).ownerOf(tokenId);\n}",
+
+  "pattern_after": "uint256 private immutable _cachedChainId = block.chainid;\nfunction owner() public view returns (address result) {\n    uint256 cachedChainId = _cachedChainId;\n    assembly {\n        // ... read tokenContract & tokenId from bytecode ...\n        if eq(mload(0x00), cachedChainId) {\n            // only do the call on the correct fork\n            result := mul(\n                mload(0x20),\n                and(\n                    gt(returndatasize(), 0x1f),\n                    staticcall(gas(), tokenContract, ..., 0x20, 0x20)\n                )\n            )\n        }\n        // else: result stays 0 — wrong fork, no owner\n    }\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "low",
+
+  "when_to_apply": "Cross-chain or fork-affected account abstractions where the canonical chain matters (ERC6551, token-bound accounts)",
+  "when_not_to_apply": "Single-chain contracts with no fork sensitivity",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

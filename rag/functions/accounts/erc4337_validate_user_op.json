@@ -1,0 +1,45 @@
+{
+  "id": "ERC4337_VALIDATE_USER_OP",
+  "category": "Accounts",
+  "version": "1.0",
+  "title": "ERC4337 validateUserOp with branchless validationData encoding and missingFunds prefund forwarding",
+  "source": "solady",
+  "source_file": "solady/src/accounts/ERC4337.sol",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC4337 validateUserOp",
+    "smart account signature validation",
+    "missingAccountFunds prefund",
+    "validationData encoding",
+    "EntryPoint pay prefund"
+  ],
+
+  "solidity_before": "function validateUserOp(PackedUserOperation calldata uo, bytes32 h, uint256 missingFunds)\n    external returns (uint256 vd)\n{\n    require(msg.sender == entryPoint());\n    bool ok = SignatureCheckerLib.isValidSignatureNowCalldata(\n        owner(), toEthSignedMessageHash(h), uo.signature\n    );\n    vd = ok ? 0 : 1;\n    if (missingFunds > 0) {\n        (bool s, ) = msg.sender.call{value: missingFunds}(\"\");\n        require(s);\n    }\n}",
+
+  "yul_optimized": "function validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash, uint256 missingAccountFunds)\n    external payable virtual onlyEntryPoint payPrefund(missingAccountFunds)\n    returns (uint256 validationData)\n{\n    validationData = _validateSignature(userOp, userOpHash);\n    _validateNonce(userOp.nonce);\n}\n\nfunction _validateSignature(PackedUserOperation calldata userOp, bytes32 userOpHash)\n    internal virtual returns (uint256 validationData)\n{\n    bool success = SignatureCheckerLib.isValidSignatureNowCalldata(\n        owner(), SignatureCheckerLib.toEthSignedMessageHash(userOpHash), userOp.signature\n    );\n    assembly {\n        // Returns 0 (valid) or 1 (invalid). Higher bits are validUntil/validAfter (left at 0 = no time bounds).\n        validationData := iszero(success)\n    }\n}\n\nmodifier payPrefund(uint256 missingAccountFunds) virtual {\n    _;\n    assembly {\n        if missingAccountFunds {\n            // Ignore failure — EntryPoint enforces, not us.\n            pop(call(gas(), caller(), missingAccountFunds, codesize(), 0, codesize(), 0))\n        }\n    }\n}",
+
+  "patterns_used": [
+    "BOOLEAN_NORMALIZE",
+    "CODESIZE_LOG4",
+    "CUSTOM_ERROR_4BYTE"
+  ],
+
+  "explanation": "Three optimizations: (1) validationData is encoded branchlessly as iszero(success) — exactly 0 on valid, 1 on invalid, with the validUntil/validAfter bits left at 0 to mean indefinite validity. The full bit layout (success | validUntil<<160 | validAfter<<208) is degenerate when both time bounds are zero. (2) The prefund forwarding uses codesize() as input/output offset for the call — codesize is a non-zero memory pointer that's never dereferenced because input/output length is 0. Saves loading a 0 constant. (3) Failure of the prefund call is intentionally ignored (pop) because the EntryPoint already enforces the prefund accounting; reverting here would only block edge cases where the EntryPoint already has sufficient deposit.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per userOp validation",
+  "gas_estimate": "medium",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "medium",
+  "when_to_apply": "Any ERC4337 v0.7 smart account with simple signature-only validation",
+  "when_not_to_apply": "Accounts with time-bounded validity (validUntil/validAfter must be encoded), accounts with paymaster integration requiring richer validationData",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

@@ -1,0 +1,45 @@
+{
+  "id": "ERC1271_RPC_SIGNIN",
+  "category": "Accounts",
+  "version": "1.0",
+  "title": "ERC1271 RPC sign-in path with gas-burn defense against on-chain replay",
+  "source": "solady",
+  "source_file": "solady/src/accounts/ERC1271.sol",
+  "difficulty": "extreme",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC1271 RPC sign-in",
+    "tx.gasprice == 0 detection",
+    "burn gas to detect off-chain call",
+    "basefee precompile lookup",
+    "gaslimit-bounded staticcall recursion"
+  ],
+
+  "solidity_before": "// Naive — same signature works on-chain and off-chain (replay risk)\nfunction _validateRPC(bytes32 h, bytes memory s) internal view returns (bool) {\n    return ECDSA.recover(h, s) == owner();\n}",
+
+  "yul_optimized": "function _erc1271IsValidSignatureViaRPC(bytes32 hash, bytes calldata signature)\n    internal view virtual returns (bool result)\n{\n    if (tx.gasprice == 0) {\n        assembly {\n            mstore(gasprice(), gasprice())\n            let b := 0x000000000000378eDCD5B5B0A24f5342d8C10485 // basefee contract\n            pop(staticcall(0xffff, b, codesize(), gasprice(), gasprice(), 0x20))\n            // If gasprice < basefee, we're off-chain — no need to burn gas\n            if iszero(mload(gasprice())) {\n                let m := mload(0x40)\n                mstore(gasprice(), 0x1626ba7e) // isValidSignature(bytes32,bytes)\n                mstore(0x20, b)\n                mstore(0x40, 0x40)\n                let gasToBurn := or(add(0xffff, gaslimit()), gaslimit())\n                if or(eq(hash, b), lt(gas(), gasToBurn)) { invalid() }\n                // Recursive staticcall consuming > gaslimit — only RPC has budget\n                pop(staticcall(gasToBurn, address(), 0x1c, 0x64, gasprice(), gasprice()))\n                mstore(0x40, m)\n            }\n        }\n        result = _erc1271IsValidSignatureNowCalldata(hash, signature);\n    }\n}",
+
+  "patterns_used": [
+    "GAS_BURN_RPC_DETECTION",
+    "INVALID_ON_PRECOMPILE_FAILURE",
+    "VARIABLE_REUSE"
+  ],
+
+  "explanation": "Allows wallet clients to verify a smart-account signature via plain eth_call without performing nested EIP-712 wrapping, while making on-chain replay computationally infeasible. (1) tx.gasprice == 0 is the heuristic for an off-chain RPC call. (2) The basefee precompile at 0x000000000000378eDCD5B5B0A24f5342d8C10485 is queried — if gasprice < basefee, definitely off-chain (eth_call lets gasprice be anything). (3) Otherwise, a recursive staticcall is made requesting gas > gaslimit; on-chain transactions are bounded by the block gaslimit, so this guarantees an out-of-gas revert if attempted on-chain, while RPC providers typically accept much larger gas budgets. (4) gasprice() is reused as a literal 0 throughout to save the `0x00` push opcode where an empty memory write is needed. (5) Variable b is reused as both basefee contract address and as a sanity hash to compare against (preventing self-referential recursion).",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per RPC sign-in",
+  "gas_estimate": "low",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "high",
+  "when_to_apply": "Smart accounts that want to support easy off-chain sign-ins (Sign-In with Ethereum) without nested EIP-712 wrapping but must prevent on-chain replay",
+  "when_not_to_apply": "Accounts where the same signature may legitimately be used both off-chain and on-chain, or chains without a basefee precompile",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

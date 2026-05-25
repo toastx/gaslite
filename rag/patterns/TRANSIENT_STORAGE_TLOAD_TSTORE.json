@@ -1,0 +1,30 @@
+{
+  "id": "TRANSIENT_STORAGE_TLOAD_TSTORE",
+  "title": "Use EIP-1153 transient storage (tload/tstore) for cross-call signaling within a single transaction",
+  "category": "storage",
+
+  "trigger_patterns": [
+    "transient storage",
+    "tload tstore",
+    "EIP-1153 transient",
+    "cross-call signal within transaction",
+    "EIP7702 proxy initialization request"
+  ],
+
+  "description": "Transient storage (EIP-1153) is per-transaction storage that costs only 100 gas per access (vs 2100/20000 cold/warm SSTORE). Cleared automatically at end of transaction. Perfect for cross-call signals like proxy initialization requests, reentrancy locks, or temporary auth flags. Requires Cancun EVM or later.",
+
+  "pattern_before": "// Regular storage — 20000 gas cold sstore + needs explicit cleanup\nbool private _initRequested;\nfunction request() external { _initRequested = true; }\nfunction handle() internal {\n    if (_initRequested) {\n        // ...\n        _initRequested = false; // 2900 gas\n    }\n}",
+
+  "pattern_after": "// Transient storage — 100 gas, auto-cleared\nbytes32 constant SLOT = 0x...;\nfunction request() external {\n    assembly { tstore(SLOT, address()) }\n}\nfunction handle() internal {\n    assembly {\n        if tload(SLOT) {\n            // ... handle ...\n            tstore(SLOT, 0) // optional cleanup, auto-clears anyway\n        }\n    }\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "high",
+
+  "when_to_apply": "Cross-call signals within a single transaction — proxy init, reentrancy guards, transient auth scopes. Requires Cancun EVM",
+  "when_not_to_apply": "Pre-Cancun chains (EVM version < cancun), data that must persist across transactions",
+
+  "risk_level": "medium",
+  "mantle_specific": false,
+  "source": "solady"
+}

@@ -1,0 +1,29 @@
+{
+  "id": "CALLDATALOAD_SHR_SELECTOR",
+  "title": "Extract msg.sig as a uint256 via shr(224, calldataload(0)) for cheap selector dispatch",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "shr(224, calldataload(0))",
+    "extract msg.sig in assembly",
+    "manual selector dispatch",
+    "fallback selector switch"
+  ],
+
+  "description": "calldataload(0) reads the first 32 bytes of calldata. The 4-byte function selector occupies the top 4 bytes (offsets 0-3). shr(224, ...) shifts those 4 bytes down into a clean uint256 in the range [0, 2^32). This produces a numerical comparison-friendly selector for or-chained eq() dispatch in fallback functions, avoiding the function-table jump overhead the compiler generates for public functions.",
+
+  "pattern_before": "// Solidity dispatch — function table\nfunction onERC721Received(...) public returns (bytes4) { ... }\nfunction onERC1155Received(...) public returns (bytes4) { ... }",
+
+  "pattern_after": "fallback() external payable {\n    assembly {\n        let s := shr(224, calldataload(0))\n        // 0x150b7a02: onERC721Received\n        // 0xf23a6e61: onERC1155Received\n        // 0xbc197c81: onERC1155BatchReceived\n        if or(eq(s, 0x150b7a02), or(eq(s, 0xf23a6e61), eq(s, 0xbc197c81))) {\n            mstore(0x20, s) // assumes mload(0x40) <= 0xffffffff\n            return(0x3c, 0x20) // return selector right-padded\n        }\n    }\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Fallback functions handling many selectors (token receiver mixins, account abstraction routers) where function-table dispatch overhead matters",
+  "when_not_to_apply": "Regular public/external functions — the compiler's function table is highly optimized for typical contracts",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}

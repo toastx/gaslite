@@ -1,0 +1,46 @@
+{
+  "id": "ERC4337_FACTORY_CREATE_ACCOUNT",
+  "category": "Accounts",
+  "version": "1.0",
+  "title": "ERC4337 deterministic account factory using LibClone ERC1967 with inline initialize() call",
+  "source": "solady",
+  "source_file": "solady/src/accounts/ERC4337Factory.sol",
+  "difficulty": "medium",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC4337 account factory",
+    "createAccount deterministic deployment",
+    "minimal ERC1967 proxy clone",
+    "owner encoded in upper bits of salt",
+    "initialize after clone deployment"
+  ],
+
+  "solidity_before": "function createAccount(address owner, bytes32 salt) external returns (address) {\n    address proxy = Clones.cloneDeterministic(implementation, salt);\n    Account(proxy).initialize(owner);\n    return proxy;\n}",
+
+  "yul_optimized": "function createAccount(bytes32 ownSalt) public payable virtual returns (address) {\n    (bool alreadyDeployed, address account) =\n        LibClone.createDeterministicERC1967(msg.value, implementation, ownSalt);\n\n    if (!alreadyDeployed) {\n        assembly {\n            mstore(0x20, shr(96, ownSalt))         // owner = upper 160 bits of salt\n            mstore(0x00, 0xc4d66de8)               // initialize(address) selector\n            if iszero(call(gas(), account, 0, 0x1c, 0x24, codesize(), 0)) {\n                returndatacopy(mload(0x40), 0, returndatasize())\n                revert(mload(0x40), returndatasize())\n            }\n        }\n    }\n    return account;\n}\n\nfunction getAddress(bytes32 ownSalt) public view virtual returns (address) {\n    return LibClone.predictDeterministicAddressERC1967(implementation, ownSalt, address(this));\n}",
+
+  "patterns_used": [
+    "SCRATCH_SPACE_CALLDATA_CONSTRUCTION",
+    "EXTERNAL_CALL_RETURN_BUBBLING",
+    "CODESIZE_LOG4",
+    "ANTIPATTERN_WRONG_REVERT_OFFSET"
+  ],
+
+  "explanation": "The owner is encoded directly into the upper 160 bits of the salt — getting deterministic per-owner addresses for free without an extra factory parameter. After clone deployment, initialize(owner) is called with calldata laid out manually: the selector 0xc4d66de8 is written at offset 0x00 (right-aligned in the 32-byte word, occupying bytes 28-31 = offsets 0x1c-0x1f), and the owner address is written at offset 0x20. call(gas(), account, 0, 0x1c, 0x24, codesize(), 0) reads exactly 36 bytes (4-byte selector + 32-byte address) starting at 0x1c. Output is discarded by writing to codesize() with length 0. On revert, returndatacopy + revert at the free memory pointer bubbles the inner error. alreadyDeployed flag from LibClone makes createAccount idempotent — calling twice is a no-op rather than a revert.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per account creation",
+  "gas_estimate": "medium",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "low",
+  "when_to_apply": "ERC4337 account factories using deterministic deployment (CREATE2) with one initial argument that fits in the salt",
+  "when_not_to_apply": "Multi-argument initializers, factories needing non-deterministic addresses, accounts with constructor logic",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

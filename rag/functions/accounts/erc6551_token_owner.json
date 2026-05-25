@@ -1,0 +1,46 @@
+{
+  "id": "ERC6551_TOKEN_OWNER",
+  "category": "Accounts",
+  "version": "1.0",
+  "title": "ERC6551 token() and owner() reading immutable args from clone bytecode with cached chain ID fork safety",
+  "source": "solady",
+  "source_file": "solady/src/accounts/ERC6551.sol",
+  "difficulty": "hard",
+  "mantle_specific": false,
+  "evm_version": "paris",
+
+  "trigger_patterns": [
+    "ERC6551 token() return triple",
+    "ERC6551 owner() via ownerOf",
+    "extcodecopy clone immutable args",
+    "cached chainId fork detection",
+    "token bound account ownership"
+  ],
+
+  "solidity_before": "function token() external view returns (uint256, address, uint256) {\n    return (chainId, tokenContract, tokenId); // 3 SLOADs\n}\nfunction owner() external view returns (address) {\n    if (block.chainid != chainId) return address(0);\n    return IERC721(tokenContract).ownerOf(tokenId);\n}",
+
+  "yul_optimized": "function token() public view virtual\n    returns (uint256 chainId, address tokenContract, uint256 tokenId)\n{\n    assembly {\n        let m := mload(0x40)\n        extcodecopy(address(), 0x00, 0x4d, 0x60) // 96 bytes from clone tail\n        chainId := mload(0x00)\n        tokenContract := mload(0x20) // upper 96 bits already clean\n        tokenId := mload(0x40)\n        mstore(0x40, m)\n    }\n}\n\nfunction owner() public view virtual returns (address result) {\n    uint256 cachedChainId = _cachedChainId;\n    assembly {\n        let m := mload(0x40)\n        extcodecopy(address(), 0x00, 0x4d, 0x60)\n        if eq(mload(0x00), cachedChainId) {\n            let tokenContract := mload(0x20)\n            // tokenId already at 0x40\n            mstore(0x20, 0x6352211e) // ownerOf(uint256)\n            result := mul(\n                mload(0x20),\n                and(\n                    gt(returndatasize(), 0x1f),\n                    staticcall(gas(), tokenContract, 0x3c, 0x24, 0x20, 0x20)\n                )\n            )\n        }\n        mstore(0x40, m)\n    }\n}",
+
+  "patterns_used": [
+    "EXTCODECOPY_IMMUTABLE_ARGS",
+    "CACHED_CHAIN_ID_FORK_SAFETY",
+    "YUL_RIGHT_TO_LEFT_EVALUATION",
+    "SCRATCH_SPACE_CALLDATA_CONSTRUCTION"
+  ],
+
+  "explanation": "ERC6551 clones have (chainId, tokenContract, tokenId) appended at runtime offset 0x4d. (1) extcodecopy reads all 96 bytes in one operation — far cheaper than 3 separate SLOADs (~600 gas vs ~6300 for cold loads). (2) The mload at 0x40 collides with the free memory pointer slot, so cached `m` is restored at the end. (3) For owner(), block.chainid is compared against an immutable cached at construction time — on the wrong fork the cachedChainId mismatches and result stays 0. (4) The ownerOf staticcall is built directly in scratch space: selector at 0x20 (bytes [28..32] = [0x3c..0x40]), tokenId already at 0x40 from extcodecopy. staticcall reads from 0x3c for 0x24 bytes (4-byte selector + 32-byte tokenId). (5) `mul(mload(0x20), and(gt(returndatasize, 0x1f), staticcall(...)))` is the standard return-validating idiom — Yul right-to-left evaluation runs staticcall first, then checks returndata size, AND with success, multiplied with the actual returned address.",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_saved_unit": "per token() or owner() call",
+  "gas_estimate": "high",
+  "benchmarked_via": "pending_forge_snapshot",
+
+  "risk_level": "medium",
+  "when_to_apply": "ERC6551 token-bound accounts deployed via the canonical registry where (chainId, tokenContract, tokenId) are appended to the clone bytecode",
+  "when_not_to_apply": "Custom ERC6551 deployments storing token info in storage, or non-clone implementations",
+
+  "foundry_test": "pending",
+  "expected_output_matches": true,
+  "forge_snapshot_delta": null
+}

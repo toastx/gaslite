@@ -1,0 +1,29 @@
+{
+  "id": "DELEGATECALL_BUBBLE_RETURNDATA",
+  "title": "Delegatecall and bubble up returndata for both success and revert paths",
+  "category": "control_flow",
+
+  "trigger_patterns": [
+    "proxy fallback delegatecall",
+    "transparent forwarding of returndata",
+    "delegatecall and return result",
+    "proxy bubble revert"
+  ],
+
+  "description": "Proxy contracts must transparently forward returndata in both success and failure cases. After delegatecall, returndatacopy(0x00, 0x00, returndatasize()) copies the entire returndata to memory; then return(0x00, returndatasize()) on success or revert(0x00, returndatasize()) on failure preserves the exact bytes the implementation produced. Standard EIP-1967 / EIP-7702 / ERC6551 proxy fallback pattern.",
+
+  "pattern_before": "// Solidity delegatecall — needs manual handling\n(bool success, bytes memory data) = impl.delegatecall(msg.data);\nif (!success) {\n    assembly { revert(add(data, 32), mload(data)) }\n}\nreturn data;",
+
+  "pattern_after": "assembly {\n    calldatacopy(0x00, 0x00, calldatasize())\n    let success := delegatecall(gas(), implementation, 0x00, calldatasize(), codesize(), 0x00)\n    returndatacopy(0x00, 0x00, returndatasize())\n    if iszero(success) { revert(0x00, returndatasize()) }\n    return(0x00, returndatasize())\n}",
+
+  "gas_saved_mantle": null,
+  "gas_saved_l1": null,
+  "gas_estimate": "medium",
+
+  "when_to_apply": "Any proxy fallback function — EIP-1967, EIP-7702, ERC6551, ERC4337 minimal proxies, transparent proxies",
+  "when_not_to_apply": "When the caller needs special handling of revert reasons distinct from the implementation",
+
+  "risk_level": "low",
+  "mantle_specific": false,
+  "source": "solady"
+}
