@@ -18,7 +18,8 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 use solang_parser::pt::{ContractPart, SourceUnitPart};
-
+use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
+use std::sync::Mutex;
 
 // ── constants ─────────────────────────────────────────────────────────────────
 const COLLECTION: &str = "gaslite_patterns";
@@ -31,7 +32,7 @@ struct AppState {
     turso_token: String,
     qdrant: Qdrant,
     deepseek_api_key: String,
-    kilo_api_key: String,
+    embedding_model: Mutex<TextEmbedding>,
 }
 
 // ── turso HTTP types ──────────────────────────────────────────────────────────
@@ -268,11 +269,14 @@ async fn main(
     let turso_token = secrets
         .get("TURSO_AUTH_TOKEN")
         .expect("TURSO_AUTH_TOKEN required");
-    let kilo_api_key = secrets
-        .get("KILO_API_KEY")
-        .expect("KILO_API_KEY required");
+
 
     let http = reqwest::Client::new();
+    let embedding_model = TextEmbedding::try_new(
+    InitOptions::new(EmbeddingModel::BGESmallENV15)
+        .with_show_download_progress(true)
+    )?;
+    
 
     // qdrant
     let qdrant = Qdrant::from_url(&qdrant_url)
@@ -301,7 +305,7 @@ async fn main(
         turso_token: turso_token.clone(),
         qdrant,
         deepseek_api_key,
-        kilo_api_key,
+        embedding_model:Mutex::new(embedding_model)
     });
 
     // run migration via HTTP
@@ -364,7 +368,7 @@ async fn optimize_contract(
     );
 
     // 2. Embed incoming clean string
-    let query_vec = get_kilo_embedding(&state.http, &query_text, &state.kilo_api_key)
+    let query_vec = get_embedding(State(state),&query_text.as_str())
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
@@ -862,7 +866,7 @@ async fn ingest_local_files(
                 )
             };
 
-            let vector = match get_kilo_embedding(&state.http, &embed_text, &state.kilo_api_key).await {
+            let vector = match get_embedding(State(state.clone()), &embed_text).await {
                 Ok(v) => v,
                 Err(e) => { failed.push((id, format!("Embedding error: {e}"))); continue; }
             };
@@ -922,43 +926,15 @@ async fn ingest_local_files(
 }
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-async fn get_kilo_embedding(
-    client: &reqwest::Client,
-    text: &str,
-    api_key: &str,
-) -> Result<Vec<f32>, String> {
-    let res = client
-        .post("https://api.kilo.ai/api/gateway/embeddings")
-        .bearer_auth(api_key)
-        .json(&serde_json::json!({
-            "model": "text-embedding-3-small",
-            "input": text
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("Kilo request failed: {e}"))?;
-
-    if !res.status().is_success() {
-        return Err(format!("Kilo returned status {}", res.status()));
-    }
-
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| format!("Kilo parse error: {e}"))?;
-
-    let embedding = json["data"][0]["embedding"]
-        .as_array()
-        .ok_or("Missing embedding array")?
-        .iter()
-        .filter_map(|v| v.as_f64().map(|f| f as f32))
-        .collect::<Vec<f32>>();
-
-    if embedding.is_empty() {
-        return Err("Kilo returned empty embedding".to_string());
-    }
-
-    Ok(embedding)
+async fn get_embedding(state: State<Arc<AppState>>, text: &str) -> Result<Vec<f32>, String> {
+    let mut model = state.embedding_model.lock().unwrap();
+    let mut embeddings = model
+        .embed(vec![text], None)
+        .map_err(|e| format!("Embed error: {e}"))?;
+        
+    embeddings
+        .pop()
+        .ok_or_else(|| "Embedding generation returned empty results".to_string())
 }
 
 async fn call_deepseek(
