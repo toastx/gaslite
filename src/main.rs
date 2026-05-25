@@ -23,7 +23,7 @@ use std::sync::Mutex;
 
 // ── constants ─────────────────────────────────────────────────────────────────
 const COLLECTION: &str = "gaslite_patterns";
-const VECTOR_DIM: u64 = 1536;
+const VECTOR_DIM: u64 = 384;
 
 // ── app state ─────────────────────────────────────────────────────────────────
 struct AppState {
