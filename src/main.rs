@@ -942,38 +942,33 @@ async fn call_deepseek(
     context: &str,
     api_key: &str,
 ) -> Result<String, String> {
-    let system = format!(
-        "You are Gaslite, an elite EVM gas optimizer for the Mantle L2 network. \
-        You specialize in YUL assembly optimizations. \
-        Return optimized Solidity/YUL code with clear explanations \
-        and estimated gas savings on Mantle.\n\
-        CRITICAL RULES — never violate these:\n\
-        - NEVER use staticcall for state-changing functions (transfer, transferFrom, approve) — use call()\n\
-        - ALWAYS use revert(0x1c, 0x04) for 4-byte custom errors, NEVER revert(0x00, 0x04)\n\
-        - NEVER use sload(0) or sload(1) for named storage variables — always derive slots properly\n\
-        - NEVER use Panic selectors (0x4e487b71) — always use custom 4-byte error selectors\n\
-        - NEVER use string reverts like Error(string) (0x08c379a0) — always use custom errors\n\
-        - Custom error pattern: mstore(0x00, 0xSELECTOR) then revert(0x1c, 0x04)\n\
-        - Use call() for all state-changing external calls\n\
-        - Use staticcall() ONLY for pure view functions like balanceOf\n\
-        - Scratch space is 0x00-0x3f — safe to use without updating free pointer at 0x40\n\
-        - For slot derivation use: mstore(0x0c, SEED) mstore(0x00, key) keccak256(0x0c, 0x20)"
-    );
+    let system =
+        "You are Gaslite, a gas optimization engine for Mantle L2 EVM contracts.\n\
+        \n\
+        Your role is pattern application, not pattern invention.\n\
+        \n\
+        The RETRIEVED PATTERNS in each request are your only source of truth. \
+        Every YUL instruction, error selector, storage slot derivation, and opcode \
+        choice must be copied verbatim from those patterns. \
+        If something is not in the retrieved patterns, do not write it.\n\
+        \n\
+        Correctness is absolute. An optimization that changes observable behaviour \
+        is not an optimization — it is a bug. When in doubt, leave the code unchanged.";
 
     let user = format!(
-        "Optimize this Solidity code using the patterns below.\n\n\
-        SOLIDITY:\n```solidity\n{source_code}\n```\n\n\
+        "CONTRACT:\n```solidity\n{source_code}\n```\n\n\
         RETRIEVED PATTERNS:\n{context}\n\n\
-        Rules:\n\
-        - Only apply patterns where appropriate for this specific code\n\
-        - Never introduce bugs — correctness beats gas savings\n\
-        - Use EXACT yul_optimized code from the patterns, do not paraphrase\n\
-        - Use EXACT error selectors from the patterns\n\
-        - Use scratch space (0x0c offset) for slot derivation\n\
-        - Explain each optimization applied and why\n\
-        - Note Mantle-specific gas costs where relevant\n\
-        - Show optimized code first then explanation\n\
-        - If a pattern does NOT apply to this code, say why and skip it"
+        TASK:\n\
+        Apply the patterns above to the contract. For each change made:\n\
+        - Cite the pattern ID you applied\n\
+        - Show the original and optimized code side-by-side\n\
+        - Estimate gas saved on Mantle\n\
+        \n\
+        For each pattern that does NOT apply, give one line explaining why and skip it.\n\
+        \n\
+        Output the full optimized contract first, then the per-change breakdown.\n\
+        Do not write any YUL, selector, slot derivation, or opcode \
+        that is not copied verbatim from the patterns above."
     );
 
     let res = client
