@@ -346,6 +346,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // ── handlers ──────────────────────────────────────────────────────────────────
 
 async fn health_check() -> &'static str {
+    info!("GET /health");
     "Gaslite Engine is online."
 }
 
@@ -353,24 +354,29 @@ async fn optimize_contract(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<OptimizeRequest>,
 ) -> Result<Json<OptimizeResponse>, (axum::http::StatusCode, String)> {
+    let t0 = std::time::Instant::now();
 
-    // 1. Use Solang AST to extract true intent and operations (0ms latency, 0 cost)
+    // 1. AST analysis
     let (detected, key_ops) = analyze_contract_ast(&payload.contract_source);
     let category_str = detected.unwrap_or("general");
 
-    // Build a semantic embedding query instead of embedding the raw, noisy code
+    info!("=== OPTIMIZE REQUEST ===");
+    info!("  contract : {} bytes", payload.contract_source.len());
+    info!("  detected : {}", category_str);
+    info!("  key_ops  : {}", if key_ops.is_empty() { "(none)".to_string() } else { key_ops.join(", ") });
+    info!("========================");
+
+    // 2. Embed
     let query_text = format!(
         "TOKEN_STANDARD_NAMESPACE: {}\n// Operations detected: {}",
         category_str.to_uppercase(),
         key_ops.join(", ")
     );
-
-    // 2. Embed incoming clean string
     let query_vec = get_embedding(state.clone(), &query_text)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
-    // 3. Search Qdrant with category filter
+    // 3. Qdrant search
     let results = match detected {
         Some(cat) => {
             let cat_results = state.qdrant.search_points(
@@ -408,20 +414,7 @@ async fn optimize_contract(
         }
     };
 
-    // 4. Log results
-    info!("--- QDRANT RETRIEVED PATTERNS ---");
-    info!("Found {} matching points.", results.len());
-
-    for point in &results {
-        if let Some(pattern_id) = point.payload.get("pattern_id") {
-            info!("Matched Pattern: {}", pattern_id);
-        } else {
-            warn!("Point missing pattern_id in payload.");
-        }
-    }
-    info!("---------------------------------");
-
-    // 5. Fetch full patterns from Turso
+    // 4. Turso fetch — patterns
     let mut pattern_contexts: Vec<String> = Vec::new();
     let mut anti_pattern_contexts: Vec<String> = Vec::new();
     let mut found_pattern_ids: Vec<String> = Vec::new();
@@ -429,13 +422,8 @@ async fn optimize_contract(
 
     for hit in results {
         let pattern_id = match hit.payload.get("pattern_id") {
-            Some(v) => {
-                let raw = v.to_string();
-                let cleaned = raw.trim().replace('"', "").to_string();
-                info!("Cleaned pattern_id: '{}'", cleaned);
-                cleaned
-            },
-            None => continue,
+            Some(v) => v.to_string().trim().replace('"', ""),
+            None => { warn!("  ! Qdrant point missing pattern_id"); continue; }
         };
 
         if !seen_ids.insert(pattern_id.clone()) { continue; }
@@ -450,50 +438,33 @@ async fn optimize_contract(
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-        info!("Turso rows for '{}': {}", pattern_id, rows.len());
         if rows.is_empty() {
-            warn!("No Turso data found for pattern: {}", pattern_id);
-            continue; // skip this pattern
+            warn!("  ! No Turso data for pattern: {}", pattern_id);
+            continue;
         }
 
         if let Some(row) = rows.first() {
-            let get = |key: &str| {
-                row.get(key)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            };
-
+            let get = |key: &str| row.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
             pattern_contexts.push(format!(
                 "PATTERN ID: {}\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
-                pattern_id,
-                get("title"),
-                get("explanation"),
-                get("yul_optimized"),
-                get("risk_level"),
-                get("when_not_to_apply"),
+                pattern_id, get("title"), get("explanation"),
+                get("yul_optimized"), get("risk_level"), get("when_not_to_apply"),
             ));
         }
     }
 
+    // 5. Qdrant search — antipatterns
     let anti_results = state.qdrant.search_points(
-    SearchPointsBuilder::new(COLLECTION, query_vec.clone(), 2)
-        .with_payload(true)
-        .filter(Filter::must([
-            Condition::matches("type", "antipattern".to_string())
-        ]))
+        SearchPointsBuilder::new(COLLECTION, query_vec.clone(), 2)
+            .with_payload(true)
+            .filter(Filter::must([Condition::matches("type", "antipattern".to_string())]))
     ).await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.result;
 
     for hit in anti_results {
         let pattern_id = match hit.payload.get("pattern_id") {
-            Some(v) => {
-                let raw = v.to_string();
-                let cleaned = raw.trim().replace('"', "").to_string();
-                info!("Cleaned pattern_id: '{}'", cleaned);
-                cleaned
-            },
-            None => continue,
+            Some(v) => v.to_string().trim().replace('"', ""),
+            None => { warn!("  ! Qdrant antipattern point missing pattern_id"); continue; }
         };
 
         if !seen_ids.insert(pattern_id.clone()) { continue; }
@@ -508,30 +479,31 @@ async fn optimize_contract(
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-        info!("Turso rows for '{}': {}", pattern_id, rows.len());
         if rows.is_empty() {
-            warn!("No Turso data found for pattern: {}", pattern_id);
+            warn!("  ! No Turso data for antipattern: {}", pattern_id);
             continue;
         }
 
         if let Some(row) = rows.first() {
-            let get = |key: &str| {
-                row.get(key)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            };
-
+            let get = |key: &str| row.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
             anti_pattern_contexts.push(format!(
                 "ANTIPATTERN ID: {}\nTitle: {}\nExplanation: {}\nWrong:\n{}\nCorrect:\n{}",
-                pattern_id,
-                get("title"),
-                get("explanation"),
-                get("solidity_before"),
-                get("yul_optimized"),
+                pattern_id, get("title"), get("explanation"),
+                get("solidity_before"), get("yul_optimized"),
             ));
         }
     }
+
+    info!("=== RAG RESULTS ===");
+    info!("  patterns    : {}", pattern_contexts.len());
+    for id in found_pattern_ids.iter().take(pattern_contexts.len()) {
+        info!("    - {}", id);
+    }
+    info!("  antipatterns: {}", anti_pattern_contexts.len());
+    for id in found_pattern_ids.iter().skip(pattern_contexts.len()) {
+        info!("    - {}", id);
+    }
+    info!("===================");
 
     let context = {
         let mut parts = Vec::new();
@@ -543,19 +515,20 @@ async fn optimize_contract(
         }
         parts.join("\n\n===\n\n")
     };
-    
-    
-    // 6. Call DeepSeek
+
+    // 6. DeepSeek
+    info!("=== DEEPSEEK CALL ===");
+    info!("  context: {} chars", context.len());
     let optimized_code =
         call_deepseek(&state.http, &payload.contract_source, &context, &state.deepseek_api_key)
             .await
-            .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+            .map_err(|e| { error!("  DeepSeek error: {}", e); (axum::http::StatusCode::BAD_GATEWAY, e) })?;
+    info!("  response: {} chars", optimized_code.len());
+    info!("  elapsed : {:.2?}", t0.elapsed());
+    info!("=====================");
 
     Ok(Json(OptimizeResponse {
-        analysis: format!(
-            "Gaslite found {} relevant patterns.",
-            found_pattern_ids.len()
-        ),
+        analysis: format!("Gaslite found {} relevant patterns.", found_pattern_ids.len()),
         suggested_patterns: found_pattern_ids,
         optimized_code,
     }))
@@ -737,6 +710,7 @@ async fn create_qdrant_indexes(state: &AppState) -> Result<(), String> {
             )
             .await
             .map_err(|e| format!("Failed to create Qdrant index on '{field}': {e}"))?;
+        info!("  index created: {}", field);
     }
     Ok(())
 }
@@ -744,11 +718,13 @@ async fn create_qdrant_indexes(state: &AppState) -> Result<(), String> {
 async fn reset_collection(
     State(state): State<Arc<AppState>>,
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
+    info!("=== RESET COLLECTION ===");
 
     state.qdrant
         .delete_collection(COLLECTION)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    info!("  deleted : {}", COLLECTION);
 
     state.qdrant
         .create_collection(
@@ -757,10 +733,12 @@ async fn reset_collection(
         )
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    info!("  created : {} ({} dims, cosine)", COLLECTION, VECTOR_DIM);
 
     create_qdrant_indexes(&state).await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    info!("========================");
     Ok("Collection reset successfully")
 }
 
@@ -771,17 +749,24 @@ async fn ingest_local_files(
     let mut successful = Vec::new();
     let mut failed = Vec::new();
 
+    info!("=== INGEST START ===");
+    info!("  directories: {}", payload.directory_paths.len());
+
     for dir_path in payload.directory_paths {
         let dir = Path::new(&dir_path);
-        
+
         if !dir.is_dir() {
+            warn!("  ! Not a directory: {}", dir_path);
             failed.push((dir_path, "Not a valid directory".to_string()));
             continue;
         }
 
+        info!("  scanning: {}", dir_path);
+
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
+                error!("  ! Cannot read directory {}: {}", dir_path, e);
                 failed.push((dir_path, format!("Cannot read directory: {e}")));
                 continue;
             }
@@ -797,12 +782,18 @@ async fn ingest_local_files(
 
             let content = match fs::read_to_string(&file_path) {
                 Ok(c) => c,
-                Err(e) => { failed.push((file_name, format!("Read error: {e}"))); continue; }
+                Err(e) => {
+                    warn!("    ! read error {}: {}", file_name, e);
+                    failed.push((file_name, format!("Read error: {e}"))); continue;
+                }
             };
 
             let meta: serde_json::Value = match serde_json::from_str(&content) {
                 Ok(v) => v,
-                Err(e) => { failed.push((file_name, format!("Invalid JSON: {e}"))); continue; }
+                Err(e) => {
+                    warn!("    ! invalid JSON {}: {}", file_name, e);
+                    failed.push((file_name, format!("Invalid JSON: {e}"))); continue;
+                }
             };
 
             // Use clean let-else syntax for the critical ID extraction
@@ -890,13 +881,23 @@ async fn ingest_local_files(
             let point = PointStruct::new(Uuid::new_v4().to_string(), vector, qdrant_payload);
 
             if let Err(e) = state.qdrant.upsert_points(UpsertPointsBuilder::new(COLLECTION, vec![point])).await {
+                warn!("    ! Qdrant upsert failed {}: {}", id, e);
                 failed.push((id, format!("Qdrant error: {e}")));
                 continue;
             }
 
+            info!("    + {} ({}, {})", id, category, entry_type);
             successful.push(id);
         }
     }
+
+    info!("=== INGEST COMPLETE ===");
+    info!("  ok     : {}", successful.len());
+    info!("  failed : {}", failed.len());
+    for (id, reason) in &failed {
+        warn!("    ! {} — {}", id, reason);
+    }
+    info!("======================");
 
     Ok(Json(IngestLocalResponse { successful_patterns: successful, failed_patterns: failed }))
 }

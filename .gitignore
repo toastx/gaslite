@@ -6,4 +6,5 @@ Secrets*.toml
 solady
 .kilo
 .claude
+.fastembed_cache
 
