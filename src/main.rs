@@ -17,7 +17,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
-use solang_parser::pt::{ContractPart, SourceUnitPart};
+use solang_parser::pt::{ContractPart, Loc, SourceUnitPart};
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 use std::sync::Mutex;
 
@@ -126,6 +126,15 @@ struct IngestLocalRequest {
 struct IngestLocalResponse {
     successful_patterns: Vec<String>,
     failed_patterns: Vec<(String, String)>,
+}
+
+// ── per-function analysis ─────────────────────────────────────────────────────
+struct FunctionInfo {
+    name: String,
+    source: String,  // exact source text extracted via byte offsets
+    start: usize,    // byte offset in original contract source
+    end: usize,
+    ops: Vec<String>,
 }
 
 // ── turso HTTP client ─────────────────────────────────────────────────────────
@@ -356,351 +365,325 @@ async fn optimize_contract(
 ) -> Result<Json<OptimizeResponse>, (axum::http::StatusCode, String)> {
     let t0 = std::time::Instant::now();
 
-    // 1. AST analysis
-    let (detected, key_ops) = analyze_contract_ast(&payload.contract_source);
-    let category_str = detected.unwrap_or("general");
+    // 1. Parse contract into individual functions
+    let (category, functions, storage_layout) = analyze_contract(&payload.contract_source);
+    let category_str = category.unwrap_or("general");
 
     info!("=== OPTIMIZE REQUEST ===");
     info!("  contract : {} bytes", payload.contract_source.len());
     info!("  detected : {}", category_str);
-    info!("  key_ops  : {}", if key_ops.is_empty() { "(none)".to_string() } else { key_ops.join(", ") });
+    info!("  functions: {}", functions.len());
     info!("========================");
 
-    // 2. Embed
-    let query_text = format!(
-        "TOKEN_STANDARD_NAMESPACE: {}\n// Operations detected: {}",
-        category_str.to_uppercase(),
-        key_ops.join(", ")
-    );
-    let query_vec = get_embedding(state.clone(), &query_text)
-        .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+    if functions.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST,
+            "No optimizable functions found — ensure the contract parses correctly".to_string()));
+    }
 
-    // 3. Qdrant search
-    let results = match detected {
-        Some(cat) => {
-            let cat_results = state.qdrant.search_points(
-                SearchPointsBuilder::new(COLLECTION, query_vec.clone(), 2)
-                    .with_payload(true)
-                    .filter(Filter::must([
-                        Condition::matches("category", cat.to_string())
-                    ]))
-            ).await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // 2. Sequential: embed + retrieve per function (mutex on embedding model serialises embed calls)
+    struct FuncWithContext {
+        info: FunctionInfo,
+        context: String,
+        pattern_ids: Vec<String>,
+    }
 
-            let gen_results = state.qdrant.search_points(
-                SearchPointsBuilder::new(COLLECTION, query_vec.clone(), 1)
-                    .with_payload(true)
-                    .filter(Filter::must_not([
-                        Condition::matches("category", "erc20".to_string()),
-                        Condition::matches("category", "erc721".to_string()),
-                        Condition::matches("category", "erc1155".to_string()),
-                        Condition::matches("category", "erc2981".to_string()),
-                        Condition::matches("category", "accounts".to_string()),
-                    ]))
-            ).await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut func_contexts: Vec<FuncWithContext> = Vec::new();
 
-            let mut combined = cat_results.result;
-            combined.extend(gen_results.result);
-            combined
-        },
-        None => {
-            state.qdrant.search_points(
-                SearchPointsBuilder::new(COLLECTION, query_vec.clone(), 5)
-                    .with_payload(true)
-            ).await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.result
-        }
-    };
+    for func in functions {
+        let query_text = format!(
+            "TOKEN_STANDARD_NAMESPACE: {}\n// Operations: {}",
+            category_str.to_uppercase(),
+            func.ops.join(", ")
+        );
 
-    // 4. Turso fetch — patterns
-    let mut pattern_contexts: Vec<String> = Vec::new();
-    let mut anti_pattern_contexts: Vec<String> = Vec::new();
-    let mut found_pattern_ids: Vec<String> = Vec::new();
-    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for hit in results {
-        let pattern_id = match hit.payload.get("pattern_id") {
-            Some(v) => v.to_string().trim().replace('"', ""),
-            None => { warn!("  ! Qdrant point missing pattern_id"); continue; }
+        let query_vec = match get_embedding(state.clone(), &query_text).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("  ! Embed failed for {}: {}", func.name, e);
+                func_contexts.push(FuncWithContext { info: func, context: String::new(), pattern_ids: vec![] });
+                continue;
+            }
         };
 
-        if !seen_ids.insert(pattern_id.clone()) { continue; }
-        found_pattern_ids.push(pattern_id.clone());
-
-        let rows = state
-            .turso_query(
-                "SELECT title, explanation, yul_optimized, risk_level, when_not_to_apply \
-                 FROM optimization_patterns WHERE id = ?",
-                vec![TursoArg::Text(pattern_id.clone())],
-            )
+        let (context, pattern_ids) = retrieve_function_context(&state, &query_vec, category)
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-        if rows.is_empty() {
-            warn!("  ! No Turso data for pattern: {}", pattern_id);
-            continue;
-        }
-
-        if let Some(row) = rows.first() {
-            let get = |key: &str| row.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            pattern_contexts.push(format!(
-                "PATTERN ID: {}\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
-                pattern_id, get("title"), get("explanation"),
-                get("yul_optimized"), get("risk_level"), get("when_not_to_apply"),
-            ));
-        }
+        info!("  {} → {} patterns retrieved", func.name, pattern_ids.len());
+        func_contexts.push(FuncWithContext { info: func, context, pattern_ids });
     }
 
-    // 5. Qdrant search — antipatterns
-    let anti_results = state.qdrant.search_points(
-        SearchPointsBuilder::new(COLLECTION, query_vec.clone(), 2)
-            .with_payload(true)
-            .filter(Filter::must([Condition::matches("type", "antipattern".to_string())]))
-    ).await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.result;
+    // 3. Parallel: one tokio task per function → DeepSeek call
+    info!("=== SPAWNING {} DEEPSEEK TASKS ===", func_contexts.len());
 
-    for hit in anti_results {
-        let pattern_id = match hit.payload.get("pattern_id") {
-            Some(v) => v.to_string().trim().replace('"', ""),
-            None => { warn!("  ! Qdrant antipattern point missing pattern_id"); continue; }
+    let handles: Vec<tokio::task::JoinHandle<Result<String, String>>> = func_contexts
+        .iter()
+        .map(|fc| {
+            let http       = state.http.clone();
+            let api_key    = state.deepseek_api_key.clone();
+            let storage    = storage_layout.clone();
+            let func_src   = fc.info.source.clone();
+            let func_name  = fc.info.name.clone();
+            let context    = fc.context.clone();
+
+            tokio::spawn(async move {
+                if context.is_empty() {
+                    info!("  {} → no patterns, kept unchanged", func_name);
+                    return Ok(func_src);
+                }
+                info!("  {} → calling DeepSeek ({} ctx chars)", func_name, context.len());
+                call_deepseek(&http, &storage, &func_src, &context, &api_key).await
+            })
+        })
+        .collect();
+
+    // Await all in order (tasks already run in parallel since all spawned before any await)
+    let mut results: Vec<Result<Result<String, String>, tokio::task::JoinError>> = Vec::new();
+    for h in handles { results.push(h.await); }
+
+    // 4. Splice optimized functions back — reverse order preserves earlier byte offsets
+    let mut optimized_source = payload.contract_source.clone();
+    let mut optimized_count = 0usize;
+    let mut all_pattern_ids: Vec<String> = Vec::new();
+
+    for (fc, task_result) in func_contexts.iter().zip(results.iter()).rev() {
+        all_pattern_ids.extend(fc.pattern_ids.iter().cloned());
+
+        let optimized_func = match task_result {
+            Ok(Ok(s)) => strip_code_fences(s),
+            Ok(Err(e)) => { error!("  ! DeepSeek failed for {}: {}", fc.info.name, e); continue; }
+            Err(e)     => { error!("  ! Task panicked for {}: {}", fc.info.name, e); continue; }
         };
 
-        if !seen_ids.insert(pattern_id.clone()) { continue; }
-        found_pattern_ids.push(pattern_id.clone());
+        if optimized_func == fc.info.source { continue; } // unchanged, skip splice
 
-        let rows = state
-            .turso_query(
-                "SELECT title, explanation, solidity_before, yul_optimized \
-                 FROM optimization_patterns WHERE id = ?",
-                vec![TursoArg::Text(pattern_id.clone())],
-            )
-            .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-        if rows.is_empty() {
-            warn!("  ! No Turso data for antipattern: {}", pattern_id);
-            continue;
-        }
-
-        if let Some(row) = rows.first() {
-            let get = |key: &str| row.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            anti_pattern_contexts.push(format!(
-                "ANTIPATTERN ID: {}\nTitle: {}\nExplanation: {}\nWrong:\n{}\nCorrect:\n{}",
-                pattern_id, get("title"), get("explanation"),
-                get("solidity_before"), get("yul_optimized"),
-            ));
+        if fc.info.end <= optimized_source.len() {
+            optimized_source.replace_range(fc.info.start..fc.info.end, &optimized_func);
+            optimized_count += 1;
         }
     }
 
-    info!("=== RAG RESULTS ===");
-    info!("  patterns    : {}", pattern_contexts.len());
-    for id in found_pattern_ids.iter().take(pattern_contexts.len()) {
-        info!("    - {}", id);
-    }
-    info!("  antipatterns: {}", anti_pattern_contexts.len());
-    for id in found_pattern_ids.iter().skip(pattern_contexts.len()) {
-        info!("    - {}", id);
-    }
-    info!("===================");
+    all_pattern_ids.sort();
+    all_pattern_ids.dedup();
 
-    let context = {
-        let mut parts = Vec::new();
-        if !pattern_contexts.is_empty() {
-            parts.push(format!("PATTERNS TO APPLY:\n\n{}", pattern_contexts.join("\n\n---\n\n")));
-        }
-        if !anti_pattern_contexts.is_empty() {
-            parts.push(format!("ANTIPATTERNS TO AVOID:\n\n{}", anti_pattern_contexts.join("\n\n---\n\n")));
-        }
-        parts.join("\n\n===\n\n")
-    };
-
-    // 6. DeepSeek
-    info!("=== DEEPSEEK CALL ===");
-    info!("  context: {} chars", context.len());
-    let optimized_code =
-        call_deepseek(&state.http, &payload.contract_source, &context, &state.deepseek_api_key)
-            .await
-            .map_err(|e| { error!("  DeepSeek error: {}", e); (axum::http::StatusCode::BAD_GATEWAY, e) })?;
-    info!("  response: {} chars", optimized_code.len());
-    info!("  elapsed : {:.2?}", t0.elapsed());
-    info!("=====================");
+    info!("=== OPTIMIZE COMPLETE ===");
+    info!("  functions optimized: {}/{}", optimized_count, func_contexts.len());
+    info!("  patterns used      : {}", all_pattern_ids.len());
+    info!("  elapsed            : {:.2?}", t0.elapsed());
+    info!("=========================");
 
     Ok(Json(OptimizeResponse {
-        analysis: format!("Gaslite found {} relevant patterns.", found_pattern_ids.len()),
-        suggested_patterns: found_pattern_ids,
-        optimized_code,
+        analysis: format!(
+            "Optimized {}/{} functions using {} patterns.",
+            optimized_count, func_contexts.len(), all_pattern_ids.len()
+        ),
+        suggested_patterns: all_pattern_ids,
+        optimized_code: optimized_source,
     }))
 }
 
 
-/// Parses raw Solidity to extract the contract category and function signatures
-fn analyze_contract_ast(source: &str) -> (Option<&'static str>, Vec<String>) {
-    let mut detected_cat: Option<&'static str> = None;
-    let mut key_ops: Vec<String> = Vec::new();
- 
-    let Ok((source_unit, _)) = solang_parser::parse(source, 0) else {
-        // fallback: basic string scan if parser fails
-        return analyze_contract_fallback(source);
+// ── Contract analysis: category + per-function extraction ────────────────────
+fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, String) {
+    let Ok((su, _)) = solang_parser::parse(source, 0) else {
+        return (detect_category_fallback(source), vec![], String::new());
     };
- 
-    for part in source_unit.0 {
+
+    let mut category: Option<&'static str> = None;
+    let mut functions: Vec<FunctionInfo> = Vec::new();
+    let mut storage_vars: Vec<String> = Vec::new();
+
+    for part in su.0 {
         let SourceUnitPart::ContractDefinition(def) = part else { continue };
- 
-        // ── 1. Inheritance detection ──────────────────────────────────────────
+
+        // Inheritance → category
         for base in &def.base {
             let base_name = base.name.identifiers.iter()
-                .map(|id| id.name.to_lowercase())
-                .collect::<Vec<_>>()
-                .join(".");
- 
-            if detected_cat.is_none() {
-                detected_cat = match base_name.as_str() {
+                .map(|id| id.name.to_lowercase()).collect::<Vec<_>>().join(".");
+            if category.is_none() {
+                category = match base_name.as_str() {
                     s if s.contains("erc721")  => Some("erc721"),
                     s if s.contains("erc1155") => Some("erc1155"),
                     s if s.contains("erc20")   => Some("erc20"),
                     s if s.contains("erc2981") => Some("erc2981"),
-                    _                           => None,
+                    _ => None,
                 };
             }
         }
- 
-        // ── 2. Function-level analysis ────────────────────────────────────────
-        for contract_part in &def.parts {
-            let ContractPart::FunctionDefinition(func) = contract_part else { continue };
- 
-            // 2a. Function name heuristics
-            if let Some(name_ident) = &func.name {
-                let func_name = name_ident.name.as_str();
-                key_ops.push(func_name.to_string());
- 
-                if detected_cat.is_none() {
-                    detected_cat = match func_name {
-                        // ERC721
-                        "ownerOf" | "tokenURI" | "setApprovalForAll"
-                        | "getApproved" | "safeTransferFrom" => Some("erc721"),
- 
-                        // ERC1155
-                        "safeBatchTransferFrom" | "balanceOfBatch"
-                        | "onERC1155Received" => Some("erc1155"),
- 
-                        // ERC20
-                        "totalSupply" | "allowance" | "permit" => Some("erc20"),
- 
-                        // DeFi staking
-                        "stake" | "unstake" | "rewardPerToken"
-                        | "earned" | "getReward" | "notifyRewardAmount" => Some("defi_staking"),
- 
-                        // DeFi AMM
-                        "swap" | "addLiquidity" | "removeLiquidity"
-                        | "getAmountOut" | "getAmountIn" => Some("defi_amm"),
- 
-                        // DeFi lending
-                        "borrow" | "repay" | "liquidate"
-                        | "supply" | "withdraw" | "getHealthFactor" => Some("defi_lending"),
- 
-                        _ => None,
-                    };
+
+        for cp in &def.parts {
+            match cp {
+                ContractPart::VariableDefinition(var) => {
+                    if let Loc::File(_, start, end) = var.loc {
+                        if let Some(text) = source.get(start..end) {
+                            storage_vars.push(text.trim().to_string());
+                        }
+                    }
                 }
-            }
- 
-            // 2b. Function body analysis
-            if let Some(body) = &func.body {
-                let body_str = format!("{body:?}");
- 
-                // EVM operation signals
-                if body_str.contains("Assembly") || body_str.contains("assembly") {
-                    key_ops.push("inline_assembly".to_string());
+                ContractPart::FunctionDefinition(func) => {
+                    // Skip unnamed (constructor/fallback/receive) and abstract (no body)
+                    let Some(name_ident) = &func.name else { continue };
+                    let Some(_) = &func.body else { continue };
+                    let Loc::File(_, start, end) = func.loc else { continue };
+                    let Some(func_text) = source.get(start..end) else { continue };
+
+                    let name = name_ident.name.clone();
+
+                    // Function name → category
+                    if category.is_none() {
+                        category = match name.as_str() {
+                            "ownerOf" | "tokenURI" | "setApprovalForAll"
+                            | "getApproved" | "safeTransferFrom" => Some("erc721"),
+                            "safeBatchTransferFrom" | "balanceOfBatch"
+                            | "onERC1155Received" => Some("erc1155"),
+                            "totalSupply" | "allowance" | "permit" => Some("erc20"),
+                            "stake" | "unstake" | "rewardPerToken"
+                            | "earned" | "getReward" => Some("defi_staking"),
+                            "swap" | "addLiquidity" | "removeLiquidity" => Some("defi_amm"),
+                            "borrow" | "repay" | "liquidate" => Some("defi_lending"),
+                            _ => None,
+                        };
+                    }
+
+                    // Per-function ops from debug-printed body
+                    let body_str = format!("{:?}", func.body);
+                    let mut ops = vec![name.clone()];
+                    if body_str.contains("Assembly")       { ops.push("inline_assembly".into()); }
+                    if body_str.contains("For(") || body_str.contains("While(")
+                                                           { ops.push("loop_iteration".into()); }
+                    if body_str.contains("Emit(")          { ops.push("event_emission".into()); }
+                    if body_str.contains("transferFrom")   { ops.push("erc20_transfer_from".into()); }
+                    if body_str.contains("msg.value")      { ops.push("eth_handling".into()); }
+                    if body_str.contains("rewardDebt") || body_str.contains("rewardPerToken")
+                                                           { ops.push("reward_calculation".into()); }
+                    ops.sort();
+                    ops.dedup();
+
+                    functions.push(FunctionInfo { name, source: func_text.to_string(), start, end, ops });
                 }
-                if body_str.contains("For(") || body_str.contains("While(") {
-                    key_ops.push("loop_iteration".to_string());
-                }
-                if body_str.contains("Emit(") {
-                    key_ops.push("event_emission".to_string());
-                }
- 
-                // External call detection
-                if body_str.contains("transferFrom") {
-                    key_ops.push("erc20_transfer_from".to_string());
-                    if detected_cat.is_none() { detected_cat = Some("erc20"); }
-                }
-                if body_str.contains("transfer") && !body_str.contains("transferFrom") {
-                    key_ops.push("erc20_transfer".to_string());
-                }
-                if body_str.contains("IERC20") || body_str.contains("ERC20(") {
-                    key_ops.push("erc20_external_call".to_string());
-                    if detected_cat.is_none() { detected_cat = Some("erc20"); }
-                }
-                if body_str.contains("IERC721") || body_str.contains("ERC721(") {
-                    key_ops.push("erc721_external_call".to_string());
-                    if detected_cat.is_none() { detected_cat = Some("erc721"); }
-                }
- 
-                // ETH handling
-                if body_str.contains("selfbalance")
-                    || body_str.contains("address(this).balance")
-                    || body_str.contains("msg.value") {
-                    key_ops.push("eth_handling".to_string());
-                }
- 
-                // Storage patterns
-                if body_str.contains("mapping") {
-                    key_ops.push("mapping_access".to_string());
-                }
- 
-                // Reward/staking body signals
-                if body_str.contains("rewardDebt") || body_str.contains("rewardPerToken") {
-                    key_ops.push("reward_calculation".to_string());
-                    if detected_cat.is_none() { detected_cat = Some("defi_staking"); }
-                }
+                _ => {}
             }
         }
     }
- 
-    key_ops.sort();
-    key_ops.dedup();
- 
-    (detected_cat, key_ops)
+
+    (category, functions, storage_vars.join("\n"))
 }
- 
-// ── Fallback: plain string scan when Solang fails to parse ────────────────────
-fn analyze_contract_fallback(source: &str) -> (Option<&'static str>, Vec<String>) {
-    let lower = source.to_lowercase();
-    let mut key_ops = Vec::new();
- 
-    let detected_cat = if lower.contains("ownerof") || lower.contains("tokenuri") {
-        Some("erc721")
-    } else if lower.contains("safebatchtransferfrom") || lower.contains("balanceofbatch") {
-        Some("erc1155")
-    } else if lower.contains("totalsupply") || lower.contains("allowance") {
-        Some("erc20")
-    } else if lower.contains("stake") || lower.contains("rewarddebt") {
-        Some("defi_staking")
-    } else if lower.contains("swap") || lower.contains("amountout") {
-        Some("defi_amm")
-    } else if lower.contains("borrow") || lower.contains("collateral") {
-        Some("defi_lending")
+
+fn detect_category_fallback(source: &str) -> Option<&'static str> {
+    let s = source.to_lowercase();
+    if s.contains("ownerof") || s.contains("tokenuri")              { return Some("erc721"); }
+    if s.contains("safebatchtransferfrom") || s.contains("balanceofbatch") { return Some("erc1155"); }
+    if s.contains("totalsupply") || s.contains("allowance")         { return Some("erc20"); }
+    if s.contains("stake") || s.contains("rewarddebt")              { return Some("defi_staking"); }
+    if s.contains("swap") || s.contains("amountout")                { return Some("defi_amm"); }
+    if s.contains("borrow") || s.contains("collateral")             { return Some("defi_lending"); }
+    None
+}
+
+
+
+// Returns (context_string, pattern_ids) for a single function's query vector
+async fn retrieve_function_context(
+    state: &Arc<AppState>,
+    query_vec: &[f32],
+    category: Option<&'static str>,
+) -> Result<(String, Vec<String>), String> {
+    let mut pattern_contexts: Vec<String> = Vec::new();
+    let mut anti_contexts: Vec<String> = Vec::new();
+    let mut pattern_ids: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let token_cats = ["erc20", "erc721", "erc1155", "erc2981", "accounts"];
+    let is_token = category.map(|c| token_cats.contains(&c)).unwrap_or(false);
+
+    let pattern_hits = if is_token {
+        let cat = category.unwrap();
+        let cat_r = state.qdrant.search_points(
+            SearchPointsBuilder::new(COLLECTION, query_vec.to_vec(), 2)
+                .with_payload(true)
+                .filter(Filter::must([Condition::matches("category", cat.to_string())]))
+        ).await.map_err(|e| e.to_string())?;
+
+        let gen_r = state.qdrant.search_points(
+            SearchPointsBuilder::new(COLLECTION, query_vec.to_vec(), 1)
+                .with_payload(true)
+                .filter(Filter::must_not(
+                    token_cats.iter().map(|c| Condition::matches("category", c.to_string())).collect::<Vec<_>>()
+                ))
+        ).await.map_err(|e| e.to_string())?;
+
+        let mut combined = cat_r.result;
+        combined.extend(gen_r.result);
+        combined
     } else {
-        None
+        state.qdrant.search_points(
+            SearchPointsBuilder::new(COLLECTION, query_vec.to_vec(), 3)
+                .with_payload(true)
+        ).await.map_err(|e| e.to_string())?.result
     };
- 
-    if lower.contains("transferfrom") { key_ops.push("erc20_transfer_from".to_string()); }
-    if lower.contains("selfbalance") || lower.contains("msg.value") {
-        key_ops.push("eth_handling".to_string());
+
+    for hit in pattern_hits {
+        let id = match hit.payload.get("pattern_id") {
+            Some(v) => v.to_string().trim().replace('"', ""),
+            None => continue,
+        };
+        if !seen.insert(id.clone()) { continue; }
+        pattern_ids.push(id.clone());
+        let rows = state.turso_query(
+            "SELECT title, explanation, yul_optimized, risk_level, when_not_to_apply FROM optimization_patterns WHERE id = ?",
+            vec![TursoArg::Text(id.clone())],
+        ).await?;
+        if let Some(row) = rows.first() {
+            let get = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            pattern_contexts.push(format!(
+                "PATTERN ID: {}\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
+                id, get("title"), get("explanation"), get("yul_optimized"), get("risk_level"), get("when_not_to_apply"),
+            ));
+        }
     }
-    if lower.contains("assembly") { key_ops.push("inline_assembly".to_string()); }
-    if lower.contains("for ") || lower.contains("while ") {
-        key_ops.push("loop_iteration".to_string());
+
+    let anti_hits = state.qdrant.search_points(
+        SearchPointsBuilder::new(COLLECTION, query_vec.to_vec(), 2)
+            .with_payload(true)
+            .filter(Filter::must([Condition::matches("type", "antipattern".to_string())]))
+    ).await.map_err(|e| e.to_string())?.result;
+
+    for hit in anti_hits {
+        let id = match hit.payload.get("pattern_id") {
+            Some(v) => v.to_string().trim().replace('"', ""),
+            None => continue,
+        };
+        if !seen.insert(id.clone()) { continue; }
+        pattern_ids.push(id.clone());
+        let rows = state.turso_query(
+            "SELECT title, explanation, solidity_before, yul_optimized FROM optimization_patterns WHERE id = ?",
+            vec![TursoArg::Text(id.clone())],
+        ).await?;
+        if let Some(row) = rows.first() {
+            let get = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            anti_contexts.push(format!(
+                "ANTIPATTERN ID: {}\nTitle: {}\nExplanation: {}\nWrong:\n{}\nCorrect:\n{}",
+                id, get("title"), get("explanation"), get("solidity_before"), get("yul_optimized"),
+            ));
+        }
     }
-    if lower.contains("emit ") { key_ops.push("event_emission".to_string()); }
- 
-    key_ops.sort();
-    key_ops.dedup();
- 
-    (detected_cat, key_ops)
+
+    let mut parts = Vec::new();
+    if !pattern_contexts.is_empty() {
+        parts.push(format!("PATTERNS TO APPLY:\n\n{}", pattern_contexts.join("\n\n---\n\n")));
+    }
+    if !anti_contexts.is_empty() {
+        parts.push(format!("ANTIPATTERNS TO AVOID:\n\n{}", anti_contexts.join("\n\n---\n\n")));
+    }
+
+    Ok((parts.join("\n\n===\n\n"), pattern_ids))
 }
- 
+
+fn strip_code_fences(s: &str) -> String {
+    let s = s.trim();
+    let s = s.strip_prefix("```solidity").or_else(|| s.strip_prefix("```")).unwrap_or(s);
+    s.strip_suffix("```").unwrap_or(s).trim().to_string()
+}
 
 async fn create_qdrant_indexes(state: &AppState) -> Result<(), String> {
     for field in ["category", "type"] {
@@ -918,7 +901,8 @@ async fn get_embedding(state: Arc<AppState>, text: &str) -> Result<Vec<f32>, Str
 
 async fn call_deepseek(
     client: &reqwest::Client,
-    source_code: &str,
+    storage_layout: &str,
+    function_source: &str,
     context: &str,
     api_key: &str,
 ) -> Result<String, String> {
@@ -936,19 +920,16 @@ async fn call_deepseek(
         is not an optimization — it is a bug. When in doubt, leave the code unchanged.";
 
     let user = format!(
-        "CONTRACT:\n```solidity\n{source_code}\n```\n\n\
+        "STORAGE LAYOUT:\n{storage_layout}\n\n\
+        FUNCTION TO OPTIMIZE:\n```solidity\n{function_source}\n```\n\n\
         RETRIEVED PATTERNS:\n{context}\n\n\
         TASK:\n\
-        Apply the patterns above to the contract. For each change made:\n\
-        - Cite the pattern ID you applied\n\
-        - Show the original and optimized code side-by-side\n\
-        - Estimate gas saved on Mantle\n\
-        \n\
-        For each pattern that does NOT apply, give one line explaining why and skip it.\n\
-        \n\
-        Output the full optimized contract first, then the per-change breakdown.\n\
+        Optimize ONLY this function using the patterns above.\n\
+        Return ONLY the complete optimized function — no contract wrapper, no imports, no other functions.\n\
+        For each change: cite the pattern ID applied and estimate gas saved on Mantle.\n\
+        If no pattern cleanly applies, return the original function unchanged.\n\
         Do not write any YUL, selector, slot derivation, or opcode \
-        that is not copied verbatim from the patterns above."
+        not copied verbatim from the patterns above."
     );
 
     let res = client
