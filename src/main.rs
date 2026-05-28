@@ -383,7 +383,7 @@ async fn optimize_contract(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
             let gen_results = state.qdrant.search_points(
-                SearchPointsBuilder::new(COLLECTION, query_vec.clone(), 5)
+                SearchPointsBuilder::new(COLLECTION, query_vec.clone(), 1)
                     .with_payload(true)
                     .filter(Filter::must_not([
                         Condition::matches("category", "erc20".to_string()),
@@ -396,8 +396,7 @@ async fn optimize_contract(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
             let mut combined = cat_results.result;
-            combined.truncate(2);
-            combined.extend(gen_results.result.into_iter().take(1));
+            combined.extend(gen_results.result);
             combined
         },
         None => {
@@ -466,7 +465,8 @@ async fn optimize_contract(
             };
 
             pattern_contexts.push(format!(
-                "PATTERN: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
+                "PATTERN ID: {}\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
+                pattern_id,
                 get("title"),
                 get("explanation"),
                 get("yul_optimized"),
@@ -501,7 +501,7 @@ async fn optimize_contract(
 
         let rows = state
             .turso_query(
-                "SELECT title, explanation, wrong_code, correct_code \
+                "SELECT title, explanation, solidity_before, yul_optimized \
                  FROM optimization_patterns WHERE id = ?",
                 vec![TursoArg::Text(pattern_id.clone())],
             )
@@ -523,11 +523,12 @@ async fn optimize_contract(
             };
 
             anti_pattern_contexts.push(format!(
-                "ANTIPATTERN: {}\nExplanation: {}\nWrong:\n{}\nCorrect:\n{}",
+                "ANTIPATTERN ID: {}\nTitle: {}\nExplanation: {}\nWrong:\n{}\nCorrect:\n{}",
+                pattern_id,
                 get("title"),
                 get("explanation"),
-                get("wrong_code"),
-                get("correct_code"),
+                get("solidity_before"),
+                get("yul_optimized"),
             ));
         }
     }
@@ -814,7 +815,10 @@ async fn ingest_local_files(
             let title = meta["title"].as_str().unwrap_or("title");
             let category = meta["category"].as_str().unwrap_or("general");
             let triggers = meta["trigger_patterns"].to_string();
-            let sol_before = meta["solidity_before"].as_str().or(meta["pattern_before"].as_str()).unwrap_or("");
+            let sol_before = meta["solidity_before"].as_str()
+                .or(meta["pattern_before"].as_str())
+                .or(meta["wrong_code"].as_str())
+                .unwrap_or("");
 
             let entry_type = meta["type"].as_str().unwrap_or("pattern");
 
@@ -861,7 +865,7 @@ async fn ingest_local_files(
                 TursoArg::Text(meta["evm_version"].as_str().unwrap_or("paris").to_string()),
                 TursoArg::Text(triggers),
                 TursoArg::Text(sol_before.to_string()),
-                TursoArg::Text(meta["yul_optimized"].as_str().or(meta["pattern_after"].as_str()).unwrap_or("").to_string()),
+                TursoArg::Text(meta["yul_optimized"].as_str().or(meta["pattern_after"].as_str()).or(meta["correct_code"].as_str()).unwrap_or("").to_string()),
                 TursoArg::Text(meta["patterns_used"].to_string()),
                 TursoArg::Text(meta["explanation"].to_string()),
                 TursoArg::Text(meta["risk_level"].as_str().unwrap_or("low").to_string()),
