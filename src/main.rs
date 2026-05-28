@@ -326,6 +326,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Migration failed");
 
+    create_qdrant_indexes(&state)
+        .await
+        .expect("Failed to create Qdrant indexes");
+
     let router = Router::new()
         .route("/health", get(health_check))
         .route("/api/optimize", post(optimize_contract))
@@ -362,7 +366,7 @@ async fn optimize_contract(
     );
 
     // 2. Embed incoming clean string
-    let query_vec = get_embedding(State(state.clone()),&query_text.as_str())
+    let query_vec = get_embedding(state.clone(), &query_text)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
 
@@ -385,6 +389,8 @@ async fn optimize_contract(
                         Condition::matches("category", "erc20".to_string()),
                         Condition::matches("category", "erc721".to_string()),
                         Condition::matches("category", "erc1155".to_string()),
+                        Condition::matches("category", "erc2981".to_string()),
+                        Condition::matches("category", "accounts".to_string()),
                     ]))
             ).await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -420,9 +426,9 @@ async fn optimize_contract(
     let mut pattern_contexts: Vec<String> = Vec::new();
     let mut anti_pattern_contexts: Vec<String> = Vec::new();
     let mut found_pattern_ids: Vec<String> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for hit in results {
-        
         let pattern_id = match hit.payload.get("pattern_id") {
             Some(v) => {
                 let raw = v.to_string();
@@ -433,8 +439,8 @@ async fn optimize_contract(
             None => continue,
         };
 
+        if !seen_ids.insert(pattern_id.clone()) { continue; }
         found_pattern_ids.push(pattern_id.clone());
-        found_pattern_ids.dedup();
 
         let rows = state
             .turso_query(
@@ -480,7 +486,6 @@ async fn optimize_contract(
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.result;
 
     for hit in anti_results {
-        
         let pattern_id = match hit.payload.get("pattern_id") {
             Some(v) => {
                 let raw = v.to_string();
@@ -491,12 +496,12 @@ async fn optimize_contract(
             None => continue,
         };
 
+        if !seen_ids.insert(pattern_id.clone()) { continue; }
         found_pattern_ids.push(pattern_id.clone());
-        found_pattern_ids.dedup();
 
         let rows = state
             .turso_query(
-                "SELECT title, explanation, wrong_code, correct_code, correct_usage_table \
+                "SELECT title, explanation, wrong_code, correct_code \
                  FROM optimization_patterns WHERE id = ?",
                 vec![TursoArg::Text(pattern_id.clone())],
             )
@@ -506,7 +511,7 @@ async fn optimize_contract(
         info!("Turso rows for '{}': {}", pattern_id, rows.len());
         if rows.is_empty() {
             warn!("No Turso data found for pattern: {}", pattern_id);
-            continue; // skip this pattern
+            continue;
         }
 
         if let Some(row) = rows.first() {
@@ -518,21 +523,25 @@ async fn optimize_contract(
             };
 
             anti_pattern_contexts.push(format!(
-                "ANTI_PATTERN: {}\nExplanation: {}\nWrong Code:\n{}\nCorrect Code {}\n Usage Table: {}",
+                "ANTIPATTERN: {}\nExplanation: {}\nWrong:\n{}\nCorrect:\n{}",
                 get("title"),
                 get("explanation"),
                 get("wrong_code"),
                 get("correct_code"),
-                get("correct_usage_table"),
             ));
         }
     }
 
-    let context = format!(
-        "follow {} and dont follow {}",
-        pattern_contexts.join("\n\n---\n\n"),
-        anti_pattern_contexts.join("\n\n---\n\n")
-    );
+    let context = {
+        let mut parts = Vec::new();
+        if !pattern_contexts.is_empty() {
+            parts.push(format!("PATTERNS TO APPLY:\n\n{}", pattern_contexts.join("\n\n---\n\n")));
+        }
+        if !anti_pattern_contexts.is_empty() {
+            parts.push(format!("ANTIPATTERNS TO AVOID:\n\n{}", anti_pattern_contexts.join("\n\n---\n\n")));
+        }
+        parts.join("\n\n===\n\n")
+    };
     
     
     // 6. Call DeepSeek
@@ -718,18 +727,17 @@ fn analyze_contract_fallback(source: &str) -> (Option<&'static str>, Vec<String>
     (detected_cat, key_ops)
 }
  
-// ── Category → Qdrant filter mapping ─────────────────────────────────────────
-// Only token standards get a category filter.
-// DeFi categories fall through to unfiltered search since those
-// knowledge base entries don't have specific category values yet.
-fn filter_category(cat: Option<&'static str>) -> Option<&'static str> {
-    match cat {
-        Some("erc20") => Some("erc20"),
-        Some("erc721") => Some("erc721"),
-        Some("erc1155") => Some("erc1155"),
-        Some("erc2981") => Some("erc2981"),
-        _ => None, // defi_staking, defi_amm, defi_lending, general → no filter
+
+async fn create_qdrant_indexes(state: &AppState) -> Result<(), String> {
+    for field in ["category", "type"] {
+        state.qdrant
+            .create_field_index(
+                CreateFieldIndexCollectionBuilder::new(COLLECTION, field, FieldType::Keyword)
+            )
+            .await
+            .map_err(|e| format!("Failed to create Qdrant index on '{field}': {e}"))?;
     }
+    Ok(())
 }
 
 async fn reset_collection(
@@ -749,46 +757,10 @@ async fn reset_collection(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let existing = state.qdrant
-    .list_collections()
-    .await
-    .expect("Failed to list Qdrant collections");
+    create_qdrant_indexes(&state).await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    if !existing.collections.iter().any(|c| c.name == COLLECTION) {
-        state.qdrant
-            .create_collection(
-                CreateCollectionBuilder::new(COLLECTION)
-                    .vectors_config(VectorParamsBuilder::new(VECTOR_DIM, Distance::Cosine)),
-            )
-            .await
-            .expect("Failed to create Qdrant collection");
-    }
-
-    // Create keyword index on category field for filtering
-    state.qdrant
-        .create_field_index(
-            CreateFieldIndexCollectionBuilder::new(
-                COLLECTION,
-                "category",
-                FieldType::Keyword,
-            )
-        )
-        .await
-        .expect("Failed to create category index");
-
-    // Also create index on entry_type if you're using that field
-    state.qdrant
-        .create_field_index(
-            CreateFieldIndexCollectionBuilder::new(
-                COLLECTION,
-                "entry_type", 
-                FieldType::Keyword,
-            )
-        )
-        .await
-        .expect("Failed to create entry_type index");
-
-        Ok("Collection reset successfully")
+    Ok("Collection reset successfully")
 }
 
 async fn ingest_local_files(
@@ -865,7 +837,7 @@ async fn ingest_local_files(
                 )
             };
 
-            let vector = match get_embedding(State(state.clone()), &embed_text).await {
+            let vector = match get_embedding(state.clone(), &embed_text).await {
                 Ok(v) => v,
                 Err(e) => { failed.push((id, format!("Embedding error: {e}"))); continue; }
             };
@@ -905,7 +877,8 @@ async fn ingest_local_files(
             // Clean Qdrant Payload Construction
             let qdrant_payload: Payload = serde_json::json!({
                 "pattern_id": id.clone(),
-                "category": category
+                "category": category,
+                "type": entry_type,
             })
             .try_into()
             .expect("Failed to parse JSON into Qdrant Payload");
@@ -925,15 +898,17 @@ async fn ingest_local_files(
 }
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-async fn get_embedding(state: State<Arc<AppState>>, text: &str) -> Result<Vec<f32>, String> {
-    let mut model = state.embedding_model.lock().unwrap();
-    let mut embeddings = model
-        .embed(vec![text], None)
-        .map_err(|e| format!("Embed error: {e}"))?;
-        
-    embeddings
-        .pop()
-        .ok_or_else(|| "Embedding generation returned empty results".to_string())
+async fn get_embedding(state: Arc<AppState>, text: &str) -> Result<Vec<f32>, String> {
+    let text = text.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut model = state.embedding_model.lock().unwrap();
+        let mut embeddings = model
+            .embed(vec![text.as_str()], None)
+            .map_err(|e| format!("Embed error: {e}"))?;
+        embeddings.pop().ok_or_else(|| "Embedding returned empty results".to_string())
+    })
+    .await
+    .map_err(|e| format!("Embedding task panicked: {e}"))?
 }
 
 async fn call_deepseek(
@@ -975,7 +950,7 @@ async fn call_deepseek(
         .post("https://api.deepseek.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user}
