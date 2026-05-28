@@ -248,27 +248,18 @@ impl AppState {
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
-#[shuttle_runtime::main]
-async fn main(
-    #[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore,
-) -> shuttle_axum::ShuttleAxum {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    tracing_subscriber::fmt::init();
+
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let deepseek_api_key = secrets
-        .get("DEEPSEEK_API_KEY")
-        .expect("DEEPSEEK_API_KEY required");
-    let qdrant_api_key = secrets
-        .get("QDRANT_API_KEY")
-        .expect("QDRANT_API_KEY required");
-    let qdrant_url = secrets
-        .get("QDRANT_CLUSTER_URL")
-        .expect("QDRANT_CLUSTER_URL required");
-    let turso_url = secrets
-        .get("TURSO_DATABASE_URL")
-        .expect("TURSO_DATABASE_URL required");
-    let turso_token = secrets
-        .get("TURSO_AUTH_TOKEN")
-        .expect("TURSO_AUTH_TOKEN required");
+    let deepseek_api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY required");
+    let qdrant_api_key = std::env::var("QDRANT_API_KEY").expect("QDRANT_API_KEY required");
+    let qdrant_url = std::env::var("QDRANT_CLUSTER_URL").expect("QDRANT_CLUSTER_URL required");
+    let turso_url = std::env::var("TURSO_DATABASE_URL").expect("TURSO_DATABASE_URL required");
+    let turso_token = std::env::var("TURSO_AUTH_TOKEN").expect("TURSO_AUTH_TOKEN required");
 
 
     let http = reqwest::Client::new();
@@ -342,7 +333,10 @@ async fn main(
         .route("/api/admin/qdrant/reset", post(reset_collection))
         .with_state(state);
 
-    Ok(router.into())
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await?;
+    info!("Gaslite listening on {}", listener.local_addr()?);
+    axum::serve(listener, router).await?;
+    Ok(())
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────

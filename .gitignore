@@ -2,4 +2,8 @@
 /target
 .shuttle*
 Secrets*.toml
+.env
 solady
+.kilo
+.claude
+
