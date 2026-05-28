@@ -1,6 +1,6 @@
 {
   "id": "YUL_RIGHT_TO_LEFT_EVALUATION",
-  "category": "compiler_mechanics",
+  "category": "control_flow",
   "version": "1.0",
   "title": "Exploiting Yul right-to-left function argument evaluation",
   "source": "solady",

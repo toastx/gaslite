@@ -1,6 +1,6 @@
 {
   "id": "ERC1271_IS_VALID_SIGNATURE",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "ERC1271 isValidSignature with nested EIP-712 (ERC7739) and short-circuit detection",
   "source": "solady",

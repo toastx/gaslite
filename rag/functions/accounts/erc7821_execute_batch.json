@@ -1,6 +1,6 @@
 {
   "id": "ERC7821_EXECUTE_BATCH",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "ERC7821 minimal batch executor with mode dispatch, optional opData, and batch-of-batches recursion",
   "source": "solady",

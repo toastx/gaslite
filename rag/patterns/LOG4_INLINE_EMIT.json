@@ -1,7 +1,7 @@
 {
   "id": "LOG4_INLINE_EMIT",
   "title": "Emit 4-topic events (TransferSingle) directly via log4 opcode with inline data",
-  "category": "events",
+  "category": "memory",
 
   "trigger_patterns": [
     "emit TransferSingle in assembly",

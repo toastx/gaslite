@@ -1,6 +1,6 @@
 {
   "id": "SAFETRANSFERLIB_SAFE_TRANSFER_FROM",
-  "category": "transfers",
+  "category": "calls",
   "version": "1.0",
   "title": "Optimized safeTransferFrom with non-standard ERC20 support and EOA checks",
   "source": "solady",

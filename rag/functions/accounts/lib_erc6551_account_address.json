@@ -1,6 +1,6 @@
 {
   "id": "LIB_ERC6551_ACCOUNT_ADDRESS",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "LibERC6551 deterministic account address computation via backwards initcode layout and CREATE2 hash",
   "source": "solady",

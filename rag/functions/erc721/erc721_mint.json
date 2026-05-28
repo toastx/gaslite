@@ -1,6 +1,6 @@
 {
   "id": "ERC721_MINT",
-  "category": "ERC721",
+  "category": "erc721",
   "version": "1.0",
   "title": "Optimized ERC721 mint with hitchhiked extraData, dual-error revert, and balance overflow check",
   "source": "solady",

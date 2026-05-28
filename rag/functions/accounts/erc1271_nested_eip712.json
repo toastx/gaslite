@@ -1,6 +1,6 @@
 {
   "id": "ERC1271_NESTED_EIP712",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "ERC1271 nested EIP-712 (TypedDataSign) signature validation with on-the-fly type-string construction",
   "source": "solady",

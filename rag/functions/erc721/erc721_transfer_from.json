@@ -1,6 +1,6 @@
 {
   "id": "ERC721_TRANSFER_FROM",
-  "category": "ERC721",
+  "category": "erc721",
   "version": "1.0",
   "title": "Optimized ERC721 transferFrom with storage hitchhiking, XOR owner swap, and dual-error packed revert",
   "source": "solady",

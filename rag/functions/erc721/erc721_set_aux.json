@@ -1,6 +1,6 @@
 {
   "id": "ERC721_SET_AUX",
-  "category": "ERC721",
+  "category": "erc721",
   "version": "1.0",
   "title": "XOR field update — modify a specific bit field in packed uint256 without disturbing other fields",
   "source": "solady",

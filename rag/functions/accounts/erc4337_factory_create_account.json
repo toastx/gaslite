@@ -1,6 +1,6 @@
 {
   "id": "ERC4337_FACTORY_CREATE_ACCOUNT",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "ERC4337 deterministic account factory using LibClone ERC1967 with inline initialize() call",
   "source": "solady",

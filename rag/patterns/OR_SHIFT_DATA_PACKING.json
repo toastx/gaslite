@@ -1,6 +1,6 @@
 {
   "id": "OR_SHIFT_DATA_PACKING",
-  "category": "storage_layout",
+  "category": "storage",
   "version": "1.0",
   "title": "Tightly packing storage slots using left shifts and bitwise OR",
   "source": "solady",

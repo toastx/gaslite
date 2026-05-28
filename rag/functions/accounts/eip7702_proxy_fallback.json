@@ -1,6 +1,6 @@
 {
   "id": "EIP7702_PROXY_FALLBACK",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "EIP7702 relay proxy fallback with admin workflow, EOA delegatecall forwarding, and transient init request",
   "source": "solady",

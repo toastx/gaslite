@@ -1,6 +1,6 @@
 {
   "id": "NON_STANDARD_ERC20_RETURN_CHECK",
-  "category": "external_interactions",
+  "category": "calls",
   "version": "1.0",
   "title": "Universal ERC20 return data verification (Standard + Missing Returns)",
   "source": "solady",

@@ -1,6 +1,6 @@
 {
   "id": "ERC6551_TOKEN_OWNER",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "ERC6551 token() and owner() reading immutable args from clone bytecode with cached chain ID fork safety",
   "source": "solady",

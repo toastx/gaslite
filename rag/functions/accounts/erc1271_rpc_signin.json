@@ -1,6 +1,6 @@
 {
   "id": "ERC1271_RPC_SIGNIN",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "ERC1271 RPC sign-in path with gas-burn defense against on-chain replay",
   "source": "solady",

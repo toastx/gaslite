@@ -1,6 +1,6 @@
 {
   "id": "BITWISE_XOR_EXTRACTION",
-  "category": "bit_manipulation",
+  "category": "bitwise",
   "version": "1.0",
   "title": "Bitwise XOR value isolation from packed slot configuration",
   "source": "solady",

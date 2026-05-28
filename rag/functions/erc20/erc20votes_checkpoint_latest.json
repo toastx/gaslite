@@ -1,6 +1,6 @@
 {
   "id": "ERC20VOTES_CHECKPOINT_LATEST",
-  "category": "ERC20",
+  "category": "erc20",
   "version": "1.0",
   "title": "Variable slot reuse — repurpose length variable as checkpoint slot to save a declaration",
   "source": "solady",

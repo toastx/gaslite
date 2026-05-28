@@ -1,7 +1,7 @@
 {
   "id": "EXTCODESIZE_SILENT_SUCCESS_PREVENTION",
   "title": "Check extcodesize to prevent silent success when calling EOA addresses",
-  "category": "external_interactions",
+  "category": "calls",
 
   "trigger_patterns": [
     "extcodesize check before call",

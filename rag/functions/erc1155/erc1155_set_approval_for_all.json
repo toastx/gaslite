@@ -1,6 +1,6 @@
 {
   "id": "ERC1155_SET_APPROVAL_FOR_ALL",
-  "category": "ERC1155",
+  "category": "erc1155",
   "version": "1.0",
   "title": "Optimized ERC1155 setApprovalForAll with 0/1 boolean enforcement",
   "source": "solady",

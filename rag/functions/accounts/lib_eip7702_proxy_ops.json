@@ -1,6 +1,6 @@
 {
   "id": "LIB_EIP7702_PROXY_OPS",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "LibEIP7702 delegation/implementation lookup, proxy bytecode validation, and admin operations",
   "source": "solady",

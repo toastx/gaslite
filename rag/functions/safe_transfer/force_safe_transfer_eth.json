@@ -1,6 +1,6 @@
 {
   "id": "SAFETRANSFERLIB_FORCE_SAFE_TRANSFER_ETH",
-  "category": "transfers",
+  "category": "calls",
   "version": "1.0",
   "title": "Force ETH transfers bypassing reverting receive() hooks",
   "source": "solady",

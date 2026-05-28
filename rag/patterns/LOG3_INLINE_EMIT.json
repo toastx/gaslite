@@ -1,7 +1,7 @@
 {
   "id": "LOG3_INLINE_EMIT",
   "title": "Emit 3-topic events (Transfer, Approval) directly via log3 opcode without ABI encoding",
-  "category": "events",
+  "category": "memory",
 
   "trigger_patterns": [
     "emit Transfer event in assembly",

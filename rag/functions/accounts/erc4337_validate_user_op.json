@@ -1,6 +1,6 @@
 {
   "id": "ERC4337_VALIDATE_USER_OP",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "ERC4337 validateUserOp with branchless validationData encoding and missingFunds prefund forwarding",
   "source": "solady",

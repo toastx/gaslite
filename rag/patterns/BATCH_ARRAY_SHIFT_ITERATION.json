@@ -1,7 +1,7 @@
 {
   "id": "BATCH_ARRAY_SHIFT_ITERATION",
   "title": "Iterate over calldata arrays using pointer arithmetic with shift-based offset computation",
-  "category": "loops",
+  "category": "control_flow",
 
   "trigger_patterns": [
     "iterate calldata array in assembly",

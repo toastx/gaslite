@@ -1,6 +1,6 @@
 {
   "id": "ERC721_CHECK_RECEIVER",
-  "category": "ERC721",
+  "category": "erc721",
   "version": "1.0",
   "title": "Use identity precompile (0x4) for cheap memory copy in ERC721 receiver check",
   "source": "solady",

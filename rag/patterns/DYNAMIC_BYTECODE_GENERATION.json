@@ -1,7 +1,7 @@
 {
   "id": "DYNAMIC_BYTECODE_GENERATION",
   "title": "Construct EVM bytecode in memory at runtime for single-use contract deployment",
-  "category": "contract_deployment",
+  "category": "calls",
 
   "trigger_patterns": [
     "create with inline bytecode",

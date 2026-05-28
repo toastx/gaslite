@@ -1,6 +1,6 @@
 {
   "id": "ERC4337_EXECUTE",
-  "category": "Accounts",
+  "category": "accounts",
   "version": "1.0",
   "title": "ERC4337 execute / executeBatch / delegateExecute with returndata bubbling and storage-slot guards",
   "source": "solady",

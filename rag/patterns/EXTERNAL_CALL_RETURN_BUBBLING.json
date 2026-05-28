@@ -1,6 +1,6 @@
 {
   "id": "EXTERNAL_CALL_RETURN_BUBBLING",
-  "category": "external_interactions",
+  "category": "calls",
   "version": "1.0",
   "title": "Efficient external call returndata bubbling",
   "source": "solady",

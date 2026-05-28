@@ -1,6 +1,6 @@
 {
   "id": "FORCE_ETH_VIA_SELFDESTRUCT",
-  "category": "contract_deployment",
+  "category": "calls",
   "version": "1.0",
   "title": "Bypass receive() reverts by dynamically deploying a SELFDESTRUCT envelope",
   "source": "solady",
