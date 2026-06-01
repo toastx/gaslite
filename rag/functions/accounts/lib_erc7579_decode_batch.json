@@ -1,6 +1,6 @@
 {
   "id": "LIB_ERC7579_DECODE_BATCH",
-  "category": "accounts",
+  "category": "erc7579",
   "version": "1.0",
   "title": "LibERC7579 mode encoding and batch decoding with bounded calldata pointer validation",
   "source": "solady",
@@ -8,7 +8,6 @@
   "difficulty": "hard",
   "mantle_specific": false,
   "evm_version": "paris",
-
   "trigger_patterns": [
     "ERC7579 mode encoding",
     "EIP-7579 batch decoding with bounds checks",
@@ -16,30 +15,23 @@
     "decodeBatchAndOpData",
     "calldata bounds check loop"
   ],
-
   "solidity_before": "function decodeBatch(bytes calldata exec) external pure returns (Call[] memory calls) {\n    return abi.decode(exec, (Call[]));\n}",
-
   "yul_optimized": "function encodeMode(bytes1 callType, bytes1 execType, bytes4 selector, bytes22 payload)\n    internal pure returns (bytes32 result)\n{\n    assembly {\n        result := or(shl(8, byte(0, callType)), byte(0, execType))\n        result := or(shr(224, selector), shl(64, result))\n        result := or(shr(80, payload), shl(176, result))\n    }\n}\n\nfunction decodeSingle(bytes calldata executionData)\n    internal pure returns (address target, uint256 value, bytes calldata data)\n{\n    assembly {\n        if iszero(gt(executionData.length, 0x33)) {\n            mstore(0x00, 0xba597e7e) // DecodingError()\n            revert(0x1c, 0x04)\n        }\n        target := shr(96, calldataload(executionData.offset))\n        value := calldataload(add(executionData.offset, 0x14))\n        data.offset := add(executionData.offset, 0x34)\n        data.length := sub(executionData.length, 0x34)\n    }\n}\n\nfunction decodeBatch(bytes calldata executionData)\n    internal pure returns (bytes32[] calldata pointers)\n{\n    assembly {\n        let u := calldataload(executionData.offset)\n        let s := add(executionData.offset, u)\n        let e := sub(add(executionData.offset, executionData.length), 0x20)\n        pointers.offset := add(s, 0x20)\n        pointers.length := calldataload(s)\n        if or(shr(64, u), gt(add(s, shl(5, pointers.length)), e)) {\n            mstore(0x00, 0xba597e7e)\n            revert(0x1c, 0x04)\n        }\n        if pointers.length {\n            for { let i := pointers.length } 1 {} {\n                i := sub(i, 1)\n                let p := calldataload(add(pointers.offset, shl(5, i)))\n                let c := add(pointers.offset, p)\n                let q := calldataload(add(c, 0x40))\n                let o := add(c, q)\n                if or(shr(64, or(calldataload(o), or(p, q))),\n                      or(gt(add(c, 0x40), e), gt(add(o, calldataload(o)), e))) {\n                    mstore(0x00, 0xba597e7e)\n                    revert(0x1c, 0x04)\n                }\n                if iszero(i) { break }\n            }\n        }\n    }\n}",
-
   "patterns_used": [
     "BATCH_ARRAY_SHIFT_ITERATION",
     "CUSTOM_ERROR_4BYTE",
     "OR_SHIFT_DATA_PACKING",
     "SCRATCH_SPACE_SLOT_HASH"
   ],
-
-  "explanation": "Three operations: (1) encodeMode packs a (callType, execType, selector, payload) tuple into a single bytes32 via three OR-shift compositions — callType in bits [248..255], execType in [240..247], selector in [208..239], payload in [16..207]. byte(0, x) extracts the leftmost byte of a 32-byte word; shr(224, selector) right-aligns the 4-byte selector; shr(80, payload) right-aligns the 22-byte payload. (2) decodeSingle reads target as an address from the first 20 bytes, value from the next 32, then data as the tail — bounds-checking that executionData.length > 51 (0x33). The bound is exactly enough to ensure the address+value fit. (3) decodeBatch performs full ABI bounds checking inline: shr(64, u) ensures the head offset doesn't overflow when shifted, the loop walks each Call's offset+inner-data-offset+inner-data-length and validates none point past the end e (= last 32 bytes of executionData). The combined `or(shr(64, or(calldataload(o), or(p, q))), or(gt(add(c, 0x40), e), gt(add(o, calldataload(o)), e)))` is one OR-tree that any single overflow or out-of-bounds condition triggers.",
-
+  "explanation": "Three operations: (1) encodeMode packs a (callType, execType, selector, payload) tuple into a single bytes32 via three OR-shift compositions \u2014 callType in bits [248..255], execType in [240..247], selector in [208..239], payload in [16..207]. byte(0, x) extracts the leftmost byte of a 32-byte word; shr(224, selector) right-aligns the 4-byte selector; shr(80, payload) right-aligns the 22-byte payload. (2) decodeSingle reads target as an address from the first 20 bytes, value from the next 32, then data as the tail \u2014 bounds-checking that executionData.length > 51 (0x33). The bound is exactly enough to ensure the address+value fit. (3) decodeBatch performs full ABI bounds checking inline: shr(64, u) ensures the head offset doesn't overflow when shifted, the loop walks each Call's offset+inner-data-offset+inner-data-length and validates none point past the end e (= last 32 bytes of executionData). The combined `or(shr(64, or(calldataload(o), or(p, q))), or(gt(add(c, 0x40), e), gt(add(o, calldataload(o)), e)))` is one OR-tree that any single overflow or out-of-bounds condition triggers.",
   "gas_saved_mantle": null,
   "gas_saved_l1": null,
   "gas_saved_unit": "per batch decode",
   "gas_estimate": "high",
   "benchmarked_via": "pending_forge_snapshot",
-
   "risk_level": "medium",
   "when_to_apply": "Smart accounts implementing EIP-7579 modular execution, ERC7821 batch executors, account abstraction routers handling multiple call modes",
-  "when_not_to_apply": "Trusted-input contexts where the executionData is constructed by the contract itself — use decodeBatchUnchecked for those",
-
+  "when_not_to_apply": "Trusted-input contexts where the executionData is constructed by the contract itself \u2014 use decodeBatchUnchecked for those",
   "foundry_test": "pending",
   "expected_output_matches": true,
   "forge_snapshot_delta": null

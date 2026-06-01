@@ -1,6 +1,6 @@
 {
   "id": "ERC6551_EXECUTE_WITH_STATE",
-  "category": "accounts",
+  "category": "erc6551",
   "version": "1.0",
   "title": "ERC6551 execute with state mutation, ownership cycle detection, and self-own SELFDESTRUCT prevention",
   "source": "solady",
@@ -8,7 +8,6 @@
   "difficulty": "hard",
   "mantle_specific": false,
   "evm_version": "paris",
-
   "trigger_patterns": [
     "ERC6551 execute call",
     "ERC6551 state update",
@@ -16,11 +15,8 @@
     "SelfOwnDetected revert",
     "token bound account state mutation"
   ],
-
   "solidity_before": "function execute(address t, uint256 v, bytes memory d, uint8 op) external returns (bytes memory) {\n    require(msg.sender == owner());\n    require(op == 0);\n    (bool ok, bytes memory r) = t.call{value: v}(d);\n    require(ok);\n    state = keccak256(abi.encode(state, msg.data));\n    return r;\n}",
-
   "yul_optimized": "function execute(address target, uint256 value, bytes calldata data, uint8 operation)\n    public payable virtual onlyValidSigner returns (bytes memory result)\n{\n    if (operation != 0) revert OperationNotSupported();\n    assembly {\n        result := mload(0x40)\n        calldatacopy(result, data.offset, data.length)\n        if iszero(call(gas(), target, value, result, data.length, codesize(), 0)) {\n            returndatacopy(result, 0, returndatasize())\n            revert(result, returndatasize())\n        }\n        mstore(result, returndatasize())\n        let o := add(result, 0x20)\n        returndatacopy(o, 0, returndatasize())\n        mstore(0x40, add(o, returndatasize()))\n    }\n    _updateState();\n}\n\nfunction _updateState() internal virtual {\n    assembly {\n        let s := _ERC6551_STATE_SLOT\n        let m := mload(0x40)\n        mstore(m, sload(s))\n        mstore(add(0x20, m), 0x40)\n        mstore(add(0x40, m), calldatasize())\n        calldatacopy(add(0x60, m), 0x00, add(0x20, calldatasize()))\n        // keccak over (oldState || 0x40 || cdsize || calldata || one zero word) rounded to 32 bytes\n        sstore(s, keccak256(m, and(add(0x7f, calldatasize()), not(0x1f))))\n    }\n}\n\nmodifier receiverFallback() override {\n    uint256 s = uint256(bytes32(msg.sig)) >> 224;\n    if (s == 0x150b7a02) { // onERC721Received\n        if (!_hasOwnershipCycle()) {\n            assembly { mstore(0x20, s); return(0x3c, 0x20) }\n        }\n        assembly {\n            mstore(0x00, 0xaed146d3) // SelfOwnDetected()\n            revert(0x1c, 0x04)\n        }\n    }\n    // ERC1155 paths skip cycle check\n    _;\n}",
-
   "patterns_used": [
     "EXTCODECOPY_IMMUTABLE_ARGS",
     "EXTERNAL_CALL_RETURN_BUBBLING",
@@ -29,19 +25,15 @@
     "CALLDATALOAD_SHR_SELECTOR",
     "CACHED_CHAIN_ID_FORK_SAFETY"
   ],
-
-  "explanation": "Three integrated mechanisms: (1) execute() does the standard call+returndata-bubble dance, then calls _updateState() which hashes (oldState || msg.data) as the new state — making every state-mutating call irreversibly observable in `state()`. The keccak256 length is rounded up to a 32-byte multiple via `and(add(0x7f, calldatasize()), not(0x1f))` to ensure deterministic hashing regardless of calldata length. (2) The 0x40 in memory at m+0x20 is the ABI offset for dynamic bytes — making the keccak input compatible with abi.encode(bytes32, bytes). (3) receiverFallback override checks ownership cycles on ERC721 receipt: walks the chain of token-bound owners via _hasOwnershipCycle(), reverting with SelfOwnDetected() if the cycle returns to address(this). Without this, an NFT could be transferred into its own ERC6551 account creating an inaccessible asset. ERC1155 receipt skips the check because batched transfers can't establish ownership cycles.",
-
+  "explanation": "Three integrated mechanisms: (1) execute() does the standard call+returndata-bubble dance, then calls _updateState() which hashes (oldState || msg.data) as the new state \u2014 making every state-mutating call irreversibly observable in `state()`. The keccak256 length is rounded up to a 32-byte multiple via `and(add(0x7f, calldatasize()), not(0x1f))` to ensure deterministic hashing regardless of calldata length. (2) The 0x40 in memory at m+0x20 is the ABI offset for dynamic bytes \u2014 making the keccak input compatible with abi.encode(bytes32, bytes). (3) receiverFallback override checks ownership cycles on ERC721 receipt: walks the chain of token-bound owners via _hasOwnershipCycle(), reverting with SelfOwnDetected() if the cycle returns to address(this). Without this, an NFT could be transferred into its own ERC6551 account creating an inaccessible asset. ERC1155 receipt skips the check because batched transfers can't establish ownership cycles.",
   "gas_saved_mantle": null,
   "gas_saved_l1": null,
   "gas_saved_unit": "per execute + state update",
   "gas_estimate": "high",
   "benchmarked_via": "pending_forge_snapshot",
-
   "risk_level": "high",
   "when_to_apply": "ERC6551 token-bound accounts where state observability matters (governance, signature replay protection) and where NFT receipt could create ownership cycles",
   "when_not_to_apply": "Non-token-bound accounts (ERC4337), accounts that don't need observable state, or accounts that explicitly allow ownership cycles",
-
   "foundry_test": "pending",
   "expected_output_matches": true,
   "forge_snapshot_delta": null

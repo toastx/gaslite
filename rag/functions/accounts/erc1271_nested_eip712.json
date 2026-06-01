@@ -1,6 +1,6 @@
 {
   "id": "ERC1271_NESTED_EIP712",
-  "category": "accounts",
+  "category": "erc1271",
   "version": "1.0",
   "title": "ERC1271 nested EIP-712 (TypedDataSign) signature validation with on-the-fly type-string construction",
   "source": "solady",
@@ -8,7 +8,6 @@
   "difficulty": "extreme",
   "mantle_specific": false,
   "evm_version": "paris",
-
   "trigger_patterns": [
     "nested EIP-712 signature",
     "TypedDataSign type construction",
@@ -16,30 +15,23 @@
     "phishing-resistant smart account signature",
     "contentsName contentsType parsing"
   ],
-
-  "solidity_before": "// Naive nested EIP-712 — would need extensive abi.encode and string concat\nfunction isValid(bytes32 hash, bytes memory sig) returns (bool) {\n    bytes32 typeHash = keccak256(\n        abi.encodePacked(\"TypedDataSign(\", contentsName, \" contents,string name,...)\", contentsType)\n    );\n    bytes32 structHash = keccak256(abi.encode(typeHash, contents, hashedName, ...));\n    bytes32 finalHash = keccak256(abi.encodePacked(\"\\x19\\x01\", appDomainSep, structHash));\n    return ECDSA.recover(finalHash, sig) == owner();\n}",
-
+  "solidity_before": "// Naive nested EIP-712 \u2014 would need extensive abi.encode and string concat\nfunction isValid(bytes32 hash, bytes memory sig) returns (bool) {\n    bytes32 typeHash = keccak256(\n        abi.encodePacked(\"TypedDataSign(\", contentsName, \" contents,string name,...)\", contentsType)\n    );\n    bytes32 structHash = keccak256(abi.encode(typeHash, contents, hashedName, ...));\n    bytes32 finalHash = keccak256(abi.encodePacked(\"\\x19\\x01\", appDomainSep, structHash));\n    return ECDSA.recover(finalHash, sig) == owner();\n}",
   "yul_optimized": "function _erc1271IsValidSignatureViaNestedEIP712(bytes32 hash, bytes calldata signature)\n    internal view virtual returns (bool result)\n{\n    uint256 t = uint256(uint160(address(this)));\n    if (t != 0) {\n        (, string memory name, string memory version, uint256 chainId,\n         address verifyingContract, bytes32 salt,) = eip712Domain();\n        assembly {\n            t := mload(0x40)\n            mstore(add(t, 0x40), keccak256(add(name, 0x20), mload(name)))\n            mstore(add(t, 0x60), keccak256(add(version, 0x20), mload(version)))\n            mstore(add(t, 0x80), chainId)\n            mstore(add(t, 0xa0), shr(96, shl(96, verifyingContract)))\n            mstore(add(t, 0xc0), salt)\n            mstore(0x40, add(t, 0xe0))\n        }\n    }\n    assembly {\n        let m := mload(0x40)\n        let c := shr(240, calldataload(add(signature.offset, sub(signature.length, 2))))\n        for {} 1 {} {\n            let l := add(0x42, c)\n            let o := add(signature.offset, sub(signature.length, l))\n            mstore(0x00, 0x1901)\n            calldatacopy(0x20, o, 0x40)\n            // PersonalSign fallback if reconstructed hash mismatches\n            if or(xor(keccak256(0x1e, 0x42), hash), or(lt(signature.length, l), iszero(c))) {\n                t := 0\n                mstore(t, _PERSONAL_SIGN_TYPEHASH)\n                mstore(0x20, hash)\n                hash := keccak256(t, 0x40)\n                break\n            }\n            // Build TypedDataSign type string on the fly\n            mstore(m, \"TypedDataSign(\")\n            let p := add(m, 0x0e)\n            calldatacopy(p, add(o, 0x40), c)\n            mstore(add(p, c), 40) // '('\n            // ... explicit-mode contentsName scan ...\n            mstore(p, \" contents,string name,string\")\n            mstore(add(p, 0x1c), \" version,uint256 chainId,address\")\n            mstore(add(p, 0x3c), \" verifyingContract,bytes32 salt)\")\n            p := add(p, 0x5c)\n            calldatacopy(p, add(o, 0x40), c)\n            calldatacopy(t, o, 0x40)\n            mstore(t, keccak256(m, sub(add(p, c), m)))\n            mstore(0x40, keccak256(t, 0xe0))\n            hash := keccak256(0x1e, add(0x42, and(1, d)))\n            signature.length := sub(signature.length, l)\n            break\n        }\n        mstore(0x40, m)\n    }\n    if (t == 0) hash = _hashTypedData(hash);\n    result = _erc1271IsValidSignatureNowCalldata(hash, signature);\n}",
-
   "patterns_used": [
     "VARIABLE_REUSE",
     "SCRATCH_SPACE_SLOT_HASH",
     "CLEAN_UPPER_BITS",
     "CALLDATACOPY_HASH"
   ],
-
-  "explanation": "Implements the ERC7739 / EIP-712 nested workflow entirely in assembly to avoid Solidity's string concatenation overhead. (1) Variable t is reused: first as a non-zero sentinel for stack-too-deep avoidance, then as a memory pointer for the typed data buffer, finally as a 0/1 flag indicating PersonalSign fallback. (2) The TypedDataSign type string is built piece-by-piece: literal \"TypedDataSign(\" + calldatacopy of contentsName + literal \" contents,string name,...\" — keccak256 over the assembled buffer produces the typehash without any abi.encodePacked allocation. (3) On hash mismatch (signature was for plain PersonalSign), t is set to 0 to signal the outer Solidity to call _hashTypedData(hash). (4) signature.length is truncated in-place after extracting the appended typed-data fields, so the inner ECDSA verification sees just the 65-byte r||s||v.",
-
+  "explanation": "Implements the ERC7739 / EIP-712 nested workflow entirely in assembly to avoid Solidity's string concatenation overhead. (1) Variable t is reused: first as a non-zero sentinel for stack-too-deep avoidance, then as a memory pointer for the typed data buffer, finally as a 0/1 flag indicating PersonalSign fallback. (2) The TypedDataSign type string is built piece-by-piece: literal \"TypedDataSign(\" + calldatacopy of contentsName + literal \" contents,string name,...\" \u2014 keccak256 over the assembled buffer produces the typehash without any abi.encodePacked allocation. (3) On hash mismatch (signature was for plain PersonalSign), t is set to 0 to signal the outer Solidity to call _hashTypedData(hash). (4) signature.length is truncated in-place after extracting the appended typed-data fields, so the inner ECDSA verification sees just the 65-byte r||s||v.",
   "gas_saved_mantle": null,
   "gas_saved_l1": null,
   "gas_saved_unit": "per signature check",
   "gas_estimate": "high",
   "benchmarked_via": "pending_forge_snapshot",
-
   "risk_level": "high",
   "when_to_apply": "Smart accounts implementing ERC7739 phishing-resistant signature validation with full type-string fidelity for wallet UIs",
   "when_not_to_apply": "Simple ECDSA-only accounts, accounts with full control over the wallet client (where simpler `keccak256(abi.encode(address(this), hash))` suffices)",
-
   "foundry_test": "pending",
   "expected_output_matches": true,
   "forge_snapshot_delta": null

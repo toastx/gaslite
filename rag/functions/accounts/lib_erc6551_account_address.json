@@ -1,6 +1,6 @@
 {
   "id": "LIB_ERC6551_ACCOUNT_ADDRESS",
-  "category": "accounts",
+  "category": "erc6551",
   "version": "1.0",
   "title": "LibERC6551 deterministic account address computation via backwards initcode layout and CREATE2 hash",
   "source": "solady",
@@ -8,7 +8,6 @@
   "difficulty": "hard",
   "mantle_specific": false,
   "evm_version": "paris",
-
   "trigger_patterns": [
     "ERC6551 deterministic address",
     "CREATE2 address with appended args",
@@ -16,11 +15,8 @@
     "registry-deployed account prediction",
     "isERC6551Account verification"
   ],
-
   "solidity_before": "function predictAccount(address impl, bytes32 salt, uint256 cid, address tc, uint256 tid) external view returns (address) {\n    bytes memory initCode = abi.encodePacked(\n        hex\"3d60ad80600a3d3981f3363d3d373d3d3d363d73\",\n        impl,\n        hex\"5af43d82803e903d91602b57fd5bf3\",\n        salt, cid, tc, tid\n    );\n    bytes32 hash = keccak256(initCode);\n    return address(uint160(uint256(keccak256(abi.encodePacked(\n        bytes1(0xff), REGISTRY, salt, hash\n    )))));\n}",
-
-  "yul_optimized": "function account(\n    address implementation_,\n    bytes32 salt_,\n    uint256 chainId_,\n    address tokenContract_,\n    uint256 tokenId_\n) internal pure returns (address result) {\n    assembly {\n        result := mload(0x40)\n        // Backwards layout — last writes to head bytes win\n        mstore(add(result, 0xa3), tokenId_)\n        mstore(add(result, 0x83), shr(96, shl(96, tokenContract_)))\n        mstore(add(result, 0x63), chainId_)\n        mstore(add(result, 0x43), salt_)\n        mstore(add(result, 0x23), 0x5af43d82803e903d91602b57fd5bf3)\n        mstore(add(result, 0x14), implementation_)\n        mstore(result, 0x3d60ad80600a3d3981f3363d3d373d3d3d363d73)\n        // CREATE2 address derivation\n        mstore8(0x00, 0xff) // CREATE2 prefix byte\n        mstore(0x35, keccak256(add(result, 0x0c), 0xb7))\n        mstore(0x01, shl(96, REGISTRY))\n        mstore(0x15, salt_)\n        result := keccak256(0x00, 0x55)\n        mstore(0x35, 0) // restore overwritten free pointer slot\n    }\n}\n\nfunction isERC6551Account(address a, address expectedImplementation)\n    internal view returns (bool result)\n{\n    assembly {\n        let m := mload(0x40)\n        extcodecopy(a, add(m, 0x20), 0x0a, 0xa3)\n        let implementation_ := shr(96, mload(add(m, 0x20)))\n        // Cheap pre-checks: codesize must be 0xad AND extracted impl matches expected\n        if mul(\n            extcodesize(implementation_),\n            gt(eq(extcodesize(a), 0xad), shl(96, xor(expectedImplementation, implementation_)))\n        ) {\n            // Reconstruct full init code & verify the address derives back to `a`\n            mstore(add(m, 0x23), 0x5af43d82803e903d91602b57fd5bf3)\n            mstore(add(m, 0x14), implementation_)\n            mstore(m, 0x3d60ad80600a3d3981f3363d3d373d3d3d363d73)\n            mstore8(0x00, 0xff)\n            mstore(0x35, keccak256(add(m, 0x0c), 0xb7))\n            mstore(0x01, shl(96, REGISTRY))\n            mstore(0x15, mload(add(m, 0x43))) // salt extracted from extcodecopied tail\n            result := iszero(shl(96, xor(a, keccak256(0x00, 0x55))))\n            mstore(0x35, 0)\n        }\n    }\n}",
-
+  "yul_optimized": "function account(\n    address implementation_,\n    bytes32 salt_,\n    uint256 chainId_,\n    address tokenContract_,\n    uint256 tokenId_\n) internal pure returns (address result) {\n    assembly {\n        result := mload(0x40)\n        // Backwards layout \u2014 last writes to head bytes win\n        mstore(add(result, 0xa3), tokenId_)\n        mstore(add(result, 0x83), shr(96, shl(96, tokenContract_)))\n        mstore(add(result, 0x63), chainId_)\n        mstore(add(result, 0x43), salt_)\n        mstore(add(result, 0x23), 0x5af43d82803e903d91602b57fd5bf3)\n        mstore(add(result, 0x14), implementation_)\n        mstore(result, 0x3d60ad80600a3d3981f3363d3d373d3d3d363d73)\n        // CREATE2 address derivation\n        mstore8(0x00, 0xff) // CREATE2 prefix byte\n        mstore(0x35, keccak256(add(result, 0x0c), 0xb7))\n        mstore(0x01, shl(96, REGISTRY))\n        mstore(0x15, salt_)\n        result := keccak256(0x00, 0x55)\n        mstore(0x35, 0) // restore overwritten free pointer slot\n    }\n}\n\nfunction isERC6551Account(address a, address expectedImplementation)\n    internal view returns (bool result)\n{\n    assembly {\n        let m := mload(0x40)\n        extcodecopy(a, add(m, 0x20), 0x0a, 0xa3)\n        let implementation_ := shr(96, mload(add(m, 0x20)))\n        // Cheap pre-checks: codesize must be 0xad AND extracted impl matches expected\n        if mul(\n            extcodesize(implementation_),\n            gt(eq(extcodesize(a), 0xad), shl(96, xor(expectedImplementation, implementation_)))\n        ) {\n            // Reconstruct full init code & verify the address derives back to `a`\n            mstore(add(m, 0x23), 0x5af43d82803e903d91602b57fd5bf3)\n            mstore(add(m, 0x14), implementation_)\n            mstore(m, 0x3d60ad80600a3d3981f3363d3d373d3d3d363d73)\n            mstore8(0x00, 0xff)\n            mstore(0x35, keccak256(add(m, 0x0c), 0xb7))\n            mstore(0x01, shl(96, REGISTRY))\n            mstore(0x15, mload(add(m, 0x43))) // salt extracted from extcodecopied tail\n            result := iszero(shl(96, xor(a, keccak256(0x00, 0x55))))\n            mstore(0x35, 0)\n        }\n    }\n}",
   "patterns_used": [
     "CREATE2_BACKWARD_INITCODE_LAYOUT",
     "EXTCODECOPY_IMMUTABLE_ARGS",
@@ -28,19 +24,15 @@
     "CLEAN_UPPER_BITS",
     "YUL_RIGHT_TO_LEFT_EVALUATION"
   ],
-
-  "explanation": "Two complementary functions: (1) account() predicts the CREATE2 address. The init code is built backwards starting from offset 0xa3 (tokenId) up to 0x00 (proxy prefix), allowing each mstore to extend the buffer without computing exact non-overlapping offsets. shr(96, shl(96, tokenContract_)) cleans the upper 96 bits of the address parameter in case it has dirty bits from ABI decoding. The CREATE2 derivation at the end uses scratch space: 0xff prefix at byte 0, REGISTRY at offset 0x01 (shl(96) places it in bytes [1..21]), salt at offset 0x15, init code hash at offset 0x35. keccak256(0x00, 0x55) hashes exactly 85 bytes = 1 + 20 + 32 + 32. (2) isERC6551Account verifies an address by extcodecopy-ing the appended args (96 bytes from offset 0x0a), extracting the embedded implementation, and reconstructing the init code in memory then re-deriving the CREATE2 address. The check `iszero(shl(96, xor(a, derived)))` compares only the lower 160 bits — equivalent to address equality but slightly cheaper than a full uint256 eq. The pre-check `extcodesize(a) == 0xad` (proxy runtime is exactly 173 bytes) is a fast-fail before doing the expensive keccak.",
-
+  "explanation": "Two complementary functions: (1) account() predicts the CREATE2 address. The init code is built backwards starting from offset 0xa3 (tokenId) up to 0x00 (proxy prefix), allowing each mstore to extend the buffer without computing exact non-overlapping offsets. shr(96, shl(96, tokenContract_)) cleans the upper 96 bits of the address parameter in case it has dirty bits from ABI decoding. The CREATE2 derivation at the end uses scratch space: 0xff prefix at byte 0, REGISTRY at offset 0x01 (shl(96) places it in bytes [1..21]), salt at offset 0x15, init code hash at offset 0x35. keccak256(0x00, 0x55) hashes exactly 85 bytes = 1 + 20 + 32 + 32. (2) isERC6551Account verifies an address by extcodecopy-ing the appended args (96 bytes from offset 0x0a), extracting the embedded implementation, and reconstructing the init code in memory then re-deriving the CREATE2 address. The check `iszero(shl(96, xor(a, derived)))` compares only the lower 160 bits \u2014 equivalent to address equality but slightly cheaper than a full uint256 eq. The pre-check `extcodesize(a) == 0xad` (proxy runtime is exactly 173 bytes) is a fast-fail before doing the expensive keccak.",
   "gas_saved_mantle": null,
   "gas_saved_l1": null,
   "gas_saved_unit": "per address derivation",
   "gas_estimate": "high",
   "benchmarked_via": "pending_forge_snapshot",
-
   "risk_level": "high",
   "when_to_apply": "Verifying or predicting addresses of accounts deployed via the canonical ERC6551Registry, building inventory tooling, or implementing on-chain ownership cycle detection",
   "when_not_to_apply": "Custom ERC6551 implementations using non-canonical registries or different proxy bytecode, in which case the hash check would always fail",
-
   "foundry_test": "pending",
   "expected_output_matches": true,
   "forge_snapshot_delta": null

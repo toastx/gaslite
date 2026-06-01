@@ -1,6 +1,6 @@
 {
   "id": "ERC4337_EXECUTE",
-  "category": "accounts",
+  "category": "erc4337",
   "version": "1.0",
   "title": "ERC4337 execute / executeBatch / delegateExecute with returndata bubbling and storage-slot guards",
   "source": "solady",
@@ -8,7 +8,6 @@
   "difficulty": "hard",
   "mantle_specific": false,
   "evm_version": "paris",
-
   "trigger_patterns": [
     "ERC4337 execute single call",
     "ERC4337 executeBatch",
@@ -16,30 +15,23 @@
     "smart account execution path",
     "owner and implementation slot integrity"
   ],
-
   "solidity_before": "function execute(address t, uint256 v, bytes memory d) external returns (bytes memory r) {\n    require(msg.sender == entryPoint() || msg.sender == owner());\n    (bool s, bytes memory ret) = t.call{value: v}(d);\n    if (!s) { assembly { revert(add(ret, 32), mload(ret)) } }\n    return ret;\n}\nfunction delegateExecute(address d, bytes memory data) external returns (bytes memory) {\n    require(msg.sender == owner());\n    (bool s, bytes memory r) = d.delegatecall(data);\n    require(s);\n    return r;\n}",
-
   "yul_optimized": "function execute(address target, uint256 value, bytes calldata data)\n    public payable virtual onlyEntryPointOrOwner returns (bytes memory result)\n{\n    assembly {\n        result := mload(0x40)\n        calldatacopy(result, data.offset, data.length)\n        if iszero(call(gas(), target, value, result, data.length, codesize(), 0)) {\n            returndatacopy(result, 0, returndatasize())\n            revert(result, returndatasize())\n        }\n        mstore(result, returndatasize()) // length\n        let o := add(result, 0x20)\n        returndatacopy(o, 0, returndatasize())\n        mstore(0x40, add(o, returndatasize()))\n    }\n}\n\nfunction delegateExecute(address delegate, bytes calldata data)\n    public payable virtual onlyEntryPointOrOwner delegateExecuteGuard\n    returns (bytes memory result)\n{\n    assembly {\n        result := mload(0x40)\n        calldatacopy(result, data.offset, data.length)\n        if iszero(delegatecall(gas(), delegate, result, data.length, codesize(), 0)) {\n            returndatacopy(result, 0, returndatasize())\n            revert(result, returndatasize())\n        }\n        mstore(result, returndatasize())\n        let o := add(result, 0x20)\n        returndatacopy(o, 0, returndatasize())\n        mstore(0x40, add(o, returndatasize()))\n    }\n}\n\nmodifier delegateExecuteGuard() virtual {\n    bytes32 ownerSlotValue;\n    bytes32 implementationSlotValue;\n    assembly {\n        implementationSlotValue := sload(_ERC1967_IMPLEMENTATION_SLOT)\n        ownerSlotValue := sload(_OWNER_SLOT)\n    }\n    _;\n    assembly {\n        if iszero(and(\n            eq(implementationSlotValue, sload(_ERC1967_IMPLEMENTATION_SLOT)),\n            eq(ownerSlotValue, sload(_OWNER_SLOT))\n        )) { revert(codesize(), 0) }\n    }\n}",
-
   "patterns_used": [
     "STORAGE_SLOT_GUARD",
     "DELEGATECALL_BUBBLE_RETURNDATA",
     "EXTERNAL_CALL_RETURN_BUBBLING",
     "CODESIZE_LOG4"
   ],
-
-  "explanation": "Three execution paths share the same returndata-bubbling idiom: (1) call/delegatecall is invoked with arguments copied directly from calldata into the free memory pointer; (2) on revert, returndatacopy + revert preserves the inner error verbatim; (3) on success, the result is laid out as a Solidity bytes memory (length prefix at result, data at result+0x20) and the free memory pointer is bumped past the returndata. delegateExecute additionally wraps the call in delegateExecuteGuard which snapshots the owner and ERC1967 implementation slots before execution and verifies they are unchanged after — preventing a malicious delegate from rewriting ownership. codesize() is used as the output offset/length pair for call() because returndata is captured separately via returndatacopy; codesize is non-zero so it satisfies the call ABI without a memory expansion.",
-
+  "explanation": "Three execution paths share the same returndata-bubbling idiom: (1) call/delegatecall is invoked with arguments copied directly from calldata into the free memory pointer; (2) on revert, returndatacopy + revert preserves the inner error verbatim; (3) on success, the result is laid out as a Solidity bytes memory (length prefix at result, data at result+0x20) and the free memory pointer is bumped past the returndata. delegateExecute additionally wraps the call in delegateExecuteGuard which snapshots the owner and ERC1967 implementation slots before execution and verifies they are unchanged after \u2014 preventing a malicious delegate from rewriting ownership. codesize() is used as the output offset/length pair for call() because returndata is captured separately via returndatacopy; codesize is non-zero so it satisfies the call ABI without a memory expansion.",
   "gas_saved_mantle": null,
   "gas_saved_l1": null,
   "gas_saved_unit": "per execution",
   "gas_estimate": "high",
   "benchmarked_via": "pending_forge_snapshot",
-
   "risk_level": "high",
   "when_to_apply": "ERC4337 smart accounts with direct execute/delegateExecute exposed to the EntryPoint or owner",
   "when_not_to_apply": "Accounts using only meta-transaction patterns (no direct external execution), or accounts with restricted target allowlists",
-
   "foundry_test": "pending",
   "expected_output_matches": true,
   "forge_snapshot_delta": null

@@ -260,7 +260,12 @@ impl AppState {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        )
+        .init();
 
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -390,13 +395,7 @@ async fn optimize_contract(
     let mut func_contexts: Vec<FuncWithContext> = Vec::new();
 
     for func in functions {
-        let query_text = format!(
-            "TOKEN_STANDARD_NAMESPACE: {}\n// Operations: {}",
-            category_str.to_uppercase(),
-            func.ops.join(", ")
-        );
-
-        let query_vec = match get_embedding(state.clone(), &query_text).await {
+        let query_vec = match get_embedding(state.clone(), &func.source).await {
             Ok(v) => v,
             Err(e) => {
                 warn!("  ! Embed failed for {}: {}", func.name, e);
@@ -529,33 +528,21 @@ fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, S
 
                     let name = name_ident.name.clone();
 
-                    // Function name → category
-                    if category.is_none() {
-                        category = match name.as_str() {
-                            "ownerOf" | "tokenURI" | "setApprovalForAll"
-                            | "getApproved" | "safeTransferFrom" => Some("erc721"),
-                            "safeBatchTransferFrom" | "balanceOfBatch"
-                            | "onERC1155Received" => Some("erc1155"),
-                            "totalSupply" | "allowance" | "permit" => Some("erc20"),
-                            "stake" | "unstake" | "rewardPerToken"
-                            | "earned" | "getReward" => Some("defi_staking"),
-                            "swap" | "addLiquidity" | "removeLiquidity" => Some("defi_amm"),
-                            "borrow" | "repay" | "liquidate" => Some("defi_lending"),
-                            _ => None,
-                        };
-                    }
-
                     // Per-function ops from debug-printed body
                     let body_str = format!("{:?}", func.body);
                     let mut ops = vec![name.clone()];
-                    if body_str.contains("Assembly")       { ops.push("inline_assembly".into()); }
+                    if body_str.contains("Assembly")       
+                        { ops.push("inline_assembly".into()); }
                     if body_str.contains("For(") || body_str.contains("While(")
-                                                           { ops.push("loop_iteration".into()); }
-                    if body_str.contains("Emit(")          { ops.push("event_emission".into()); }
-                    if body_str.contains("transferFrom")   { ops.push("erc20_transfer_from".into()); }
-                    if body_str.contains("msg.value")      { ops.push("eth_handling".into()); }
+                        { ops.push("loop_iteration".into()); }
+                    if body_str.contains("Emit(")          
+                        { ops.push("event_emission".into()); }
+                    if body_str.contains("transferFrom")   
+                        { ops.push("erc20_transfer_from".into()); }
+                    if body_str.contains("msg.value")      
+                        { ops.push("eth_handling".into()); }
                     if body_str.contains("rewardDebt") || body_str.contains("rewardPerToken")
-                                                           { ops.push("reward_calculation".into()); }
+                        { ops.push("reward_calculation".into()); }
                     ops.sort();
                     ops.dedup();
 
@@ -571,12 +558,10 @@ fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, S
 
 fn detect_category_fallback(source: &str) -> Option<&'static str> {
     let s = source.to_lowercase();
-    if s.contains("ownerof") || s.contains("tokenuri")              { return Some("erc721"); }
-    if s.contains("safebatchtransferfrom") || s.contains("balanceofbatch") { return Some("erc1155"); }
-    if s.contains("totalsupply") || s.contains("allowance")         { return Some("erc20"); }
-    if s.contains("stake") || s.contains("rewarddebt")              { return Some("defi_staking"); }
-    if s.contains("swap") || s.contains("amountout")                { return Some("defi_amm"); }
-    if s.contains("borrow") || s.contains("collateral")             { return Some("defi_lending"); }
+    if s.contains("is erc721") || s.contains(": erc721")  { return Some("erc721"); }
+    if s.contains("is erc1155") || s.contains(": erc1155") { return Some("erc1155"); }
+    if s.contains("is erc2981") || s.contains(": erc2981") { return Some("erc2981"); }
+    if s.contains("is erc20") || s.contains(": erc20")    { return Some("erc20"); }
     None
 }
 
@@ -909,27 +894,32 @@ async fn call_deepseek(
     let system =
         "You are Gaslite, a gas optimization engine for Mantle L2 EVM contracts.\n\
         \n\
-        Your role is pattern application, not pattern invention.\n\
+        Your role is pattern application and adaptation — not pattern invention.\n\
         \n\
-        The RETRIEVED PATTERNS in each request are your only source of truth. \
-        Every YUL instruction, error selector, storage slot derivation, and opcode \
-        choice must be copied verbatim from those patterns. \
-        If something is not in the retrieved patterns, do not write it.\n\
+        The RETRIEVED PATTERNS are your source of truth for YUL structure, opcodes, \
+        and error selectors. Use them as templates:\n\
+        - Keep the YUL opcodes, control flow, and error selectors exactly as shown\n\
+        - Adapt storage slot variable names and mapping key derivations to match \
+          the user contract's actual storage layout shown in STORAGE LAYOUT\n\
+        - For standard Solidity mappings, derive slots as: \
+          mstore(0x00, key), mstore(0x20, slot_number), keccak256(0x00, 0x40)\n\
+        - Replace require(condition, string) with the 4-byte custom error pattern: \
+          mstore(0x00, 0xSELECTOR), revert(0x1c, 0x04)\n\
+        - Do not invent YUL opcodes, selectors, or patterns not present in the retrieved patterns\n\
         \n\
         Correctness is absolute. An optimization that changes observable behaviour \
-        is not an optimization — it is a bug. When in doubt, leave the code unchanged.";
+        is not an optimization — it is a bug.";
 
     let user = format!(
         "STORAGE LAYOUT:\n{storage_layout}\n\n\
         FUNCTION TO OPTIMIZE:\n```solidity\n{function_source}\n```\n\n\
         RETRIEVED PATTERNS:\n{context}\n\n\
         TASK:\n\
-        Optimize ONLY this function using the patterns above.\n\
-        Return ONLY the complete optimized function — no contract wrapper, no imports, no other functions.\n\
-        For each change: cite the pattern ID applied and estimate gas saved on Mantle.\n\
-        If no pattern cleanly applies, return the original function unchanged.\n\
-        Do not write any YUL, selector, slot derivation, or opcode \
-        not copied verbatim from the patterns above."
+        Optimize ONLY this function by applying the retrieved patterns as templates, \
+        adapting slot derivations and variable names to this contract's storage layout.\n\
+        Return ONLY the complete optimized function — no contract wrapper, no imports.\n\
+        After the function, add one line per change: pattern ID applied + estimated gas saved on Mantle.\n\
+        If a pattern genuinely cannot apply even with adaptation, say why in one line and skip it."
     );
 
     let res = client

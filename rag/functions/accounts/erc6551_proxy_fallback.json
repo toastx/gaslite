@@ -1,6 +1,6 @@
 {
   "id": "ERC6551_PROXY_FALLBACK",
-  "category": "accounts",
+  "category": "erc6551",
   "version": "1.0",
   "title": "ERC6551 relay proxy fallback with lazy default-implementation initialization for Etherscan compatibility",
   "source": "solady",
@@ -8,7 +8,6 @@
   "difficulty": "hard",
   "mantle_specific": false,
   "evm_version": "paris",
-
   "trigger_patterns": [
     "ERC6551 relay proxy",
     "lazy ERC1967 implementation initialization",
@@ -16,30 +15,23 @@
     "proxy fallback delegatecall",
     "etherscan proxy detection"
   ],
-
   "solidity_before": "fallback() external payable {\n    address impl = ERC1967._getImplementation();\n    if (impl == address(0)) impl = defaultImpl;\n    (bool ok, bytes memory r) = impl.delegatecall(msg.data);\n    if (!ok) assembly { revert(add(r, 32), mload(r)) }\n    assembly { return(add(r, 32), mload(r)) }\n}",
-
   "yul_optimized": "fallback() external payable virtual {\n    bytes32 implementation;\n    assembly {\n        mstore(0x40, returndatasize()) // Optimization: change `6080604052` runtime prelude into `3d604052`\n        implementation := sload(_ERC1967_IMPLEMENTATION_SLOT)\n    }\n    if (implementation == bytes32(0)) {\n        implementation = _defaultImplementation;\n        assembly {\n            // Lazy-initialize impl slot only on calldatasize == 0 (the 0-ETH-send trick)\n            // Function selectors are 4 bytes so staticcalls won't accidentally trigger this.\n            if iszero(calldatasize()) { sstore(_ERC1967_IMPLEMENTATION_SLOT, implementation) }\n        }\n    }\n    assembly {\n        calldatacopy(returndatasize(), returndatasize(), calldatasize())\n        if iszero(delegatecall(gas(), implementation,\n            returndatasize(), calldatasize(), codesize(), returndatasize())) {\n            returndatacopy(0x00, 0x00, returndatasize())\n            revert(0x00, returndatasize())\n        }\n        returndatacopy(0x00, 0x00, returndatasize())\n        return(0x00, returndatasize())\n    }\n}",
-
   "patterns_used": [
     "DELEGATECALL_BUBBLE_RETURNDATA",
     "EXTERNAL_CALL_RETURN_BUBBLING",
     "VARIABLE_REUSE",
     "CODESIZE_LOG4"
   ],
-
-  "explanation": "Three optimizations: (1) `mstore(0x40, returndatasize())` — at the start of fallback, returndatasize is 0, so this is a free way to write 0 to the free memory pointer location, but it tricks the compiler into emitting `3d604052` (RETURNDATASIZE PUSH1 0x40 MSTORE = 4 bytes) instead of the standard `6080604052` (PUSH1 0x80 PUSH1 0x40 MSTORE = 5 bytes), shaving 1 byte off every fallback dispatch. (2) Lazy initialization: the impl slot is only written on calldatasize == 0 (sending 0 ETH triggers the fallback with no calldata). This means staticcalls to view functions (which always have a 4-byte selector at minimum) never accidentally write to the impl slot, while still allowing Etherscan's 'Is this a proxy?' detection to work after a single 0-ETH ping. (3) returndatasize() is reused as a literal 0 for input/output offsets and length, saving the explicit PUSH1 0x00 opcodes. codesize() serves the same role for the call output position.",
-
+  "explanation": "Three optimizations: (1) `mstore(0x40, returndatasize())` \u2014 at the start of fallback, returndatasize is 0, so this is a free way to write 0 to the free memory pointer location, but it tricks the compiler into emitting `3d604052` (RETURNDATASIZE PUSH1 0x40 MSTORE = 4 bytes) instead of the standard `6080604052` (PUSH1 0x80 PUSH1 0x40 MSTORE = 5 bytes), shaving 1 byte off every fallback dispatch. (2) Lazy initialization: the impl slot is only written on calldatasize == 0 (sending 0 ETH triggers the fallback with no calldata). This means staticcalls to view functions (which always have a 4-byte selector at minimum) never accidentally write to the impl slot, while still allowing Etherscan's 'Is this a proxy?' detection to work after a single 0-ETH ping. (3) returndatasize() is reused as a literal 0 for input/output offsets and length, saving the explicit PUSH1 0x00 opcodes. codesize() serves the same role for the call output position.",
   "gas_saved_mantle": null,
   "gas_saved_l1": null,
   "gas_saved_unit": "per call through proxy",
   "gas_estimate": "medium",
   "benchmarked_via": "pending_forge_snapshot",
-
   "risk_level": "medium",
   "when_to_apply": "ERC6551 token-bound accounts that need to be upgradeable via a relay proxy, with Etherscan proxy detection support",
   "when_not_to_apply": "Non-upgradeable ERC6551 accounts, contexts where the bytecode-size optimization is irrelevant",
-
   "foundry_test": "pending",
   "expected_output_matches": true,
   "forge_snapshot_delta": null

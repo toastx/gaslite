@@ -1,6 +1,6 @@
 {
   "id": "TIMELOCK_PROPOSE_EXECUTE",
-  "category": "accounts",
+  "category": "timelock",
   "version": "1.0",
   "title": "Timelock propose/execute with packed (done|readyTimestamp) storage and predecessor dependency check",
   "source": "solady",
@@ -8,7 +8,6 @@
   "difficulty": "extreme",
   "mantle_specific": true,
   "evm_version": "paris",
-
   "trigger_patterns": [
     "Timelock propose operation",
     "Timelock execute with delay",
@@ -16,11 +15,8 @@
     "predecessor proposal dependency",
     "packed done flag with readyTimestamp"
   ],
-
   "solidity_before": "struct Op { bool done; uint256 readyTimestamp; }\nmapping(bytes32 => Op) ops;\nfunction propose(bytes32 mode, bytes calldata data, uint256 delay) external onlyProposer returns (bytes32 id) {\n    require(delay >= minDelay);\n    id = keccak256(abi.encode(mode, keccak256(data)));\n    require(ops[id].readyTimestamp == 0);\n    ops[id] = Op(false, block.timestamp + delay);\n    emit Proposed(id, mode, data, block.timestamp + delay);\n}",
-
   "yul_optimized": "function propose(bytes32 mode, bytes calldata executionData, uint256 delay)\n    public virtual onlyRole(PROPOSER_ROLE) returns (bytes32 id)\n{\n    LibERC7579.decodeBatchAndOpData(executionData);\n    uint256 t = minDelay();\n    assembly {\n        if shr(254, delay) {\n            mstore(0x00, 0xd1efaf25) // TimelockDelayOverflow()\n            revert(0x1c, 0x04)\n        }\n        if lt(delay, t) {\n            mstore(0x00, 0x54336609) // TimelockInsufficientDelay(uint256,uint256)\n            mstore(0x20, delay)\n            mstore(0x40, t)\n            revert(0x1c, 0x44)\n        }\n        let m := mload(0x40)\n        calldatacopy(add(m, 0x80), executionData.offset, executionData.length)\n        mstore(0x00, mode)\n        mstore(0x20, keccak256(add(m, 0x80), executionData.length))\n        id := keccak256(0x00, 0x40)\n        // Operation slot: keccak256(id || _TIMELOCK_SLOT) using 0x29 = 41 bytes\n        mstore(0x09, _TIMELOCK_SLOT)\n        mstore(0x00, id)\n        let s := keccak256(0x00, 0x29)\n        if sload(s) {\n            mstore(0x00, 0xd639b0bf) // TimelockInvalidOperation\n            mstore(0x20, id)\n            mstore(0x40, 1) // expectedStates bitmap = 1 << Unset\n            revert(0x1c, 0x44)\n        }\n        let r := add(delay, timestamp()) // readyTimestamp\n        sstore(s, shl(1, r)) // done=0 in bit 0, ts in bits [1..255]\n        // Emit Proposed event with executionData padded to 32 bytes\n        mstore(m, mode)\n        mstore(add(m, 0x20), 0x60)\n        mstore(add(m, 0x40), r)\n        mstore(add(m, 0x60), executionData.length)\n        mstore(add(add(m, 0x80), executionData.length), 0)\n        log2(m, add(0x80, and(not(0x1f), add(0x1f, executionData.length))),\n            _PROPOSED_EVENT_SIGNATURE, id)\n    }\n}\n\nfunction _execute(bytes32 mode, bytes calldata executionData, Call[] calldata calls, bytes calldata opData)\n    internal virtual override\n{\n    if (!hasRole(OPEN_ROLE_HOLDER, EXECUTOR_ROLE)) _checkRole(EXECUTOR_ROLE);\n    bytes32 id;\n    uint256 s;\n    assembly {\n        calldatacopy(mload(0x40), executionData.offset, executionData.length)\n        mstore(0x00, mode)\n        mstore(0x20, keccak256(mload(0x40), executionData.length))\n        id := keccak256(0x00, 0x40)\n        mstore(0x09, _TIMELOCK_SLOT)\n        mstore(0x00, id)\n        s := keccak256(0x00, 0x29)\n        let p := sload(s)\n        // Ready iff: not done (bit 0 == 0) AND non-zero AND timestamp >= ts\n        if or(or(and(1, p), iszero(p)), lt(timestamp(), shr(1, p))) {\n            mstore(0x00, 0xd639b0bf)\n            mstore(0x20, id)\n            mstore(0x40, 4) // 1 << Ready\n            revert(0x1c, 0x44)\n        }\n        if iszero(lt(opData.length, 0x20)) {\n            let b := calldataload(opData.offset)\n            mstore(0x00, b)\n            // Predecessor must be done (bit 0 == 1) OR be zero (no predecessor)\n            if iszero(or(iszero(b), and(1, sload(keccak256(0x00, 0x29))))) {\n                mstore(0x00, 0x90a9a618) // TimelockUnexecutedPredecessor\n                mstore(0x20, b)\n                revert(0x1c, 0x24)\n            }\n        }\n    }\n    _execute(calls, id);\n    assembly {\n        // Recheck for reentrancy\n        let p := sload(s)\n        if or(or(and(1, p), iszero(p)), lt(timestamp(), shr(1, p))) {\n            mstore(0x00, 0xd639b0bf)\n            mstore(0x20, id)\n            mstore(0x40, 4)\n            revert(0x1c, 0x44)\n        }\n        sstore(s, or(1, p)) // Set done bit, preserve ts\n    }\n}",
-
   "patterns_used": [
     "PACKED_FLAG_BIT0",
     "SCRATCH_SPACE_SLOT_HASH",
@@ -29,19 +25,15 @@
     "ANTIPATTERN_WRONG_REVERT_OFFSET",
     "SLOAD_CACHE_BEFORE_SSTORE"
   ],
-
-  "explanation": "Comprehensive integration of multiple optimizations: (1) Operation slot derivation uses 41-byte keccak input — id at offset 0x00 (32 bytes) followed by _TIMELOCK_SLOT at offset 0x09 (9 bytes truncated from 32). The mstore(0x09, _TIMELOCK_SLOT) writes 32 bytes but only the lower 9 are within the keccak range. This packs id+slot-seed into less than the standard 64-byte mapping derivation. (2) Operation state is packed as `(readyTimestamp << 1) | done` — bit 0 is the done flag, bits [1..255] hold the ready timestamp. propose stores `shl(1, r)` (done=0); execute marks done via `sstore(s, or(1, p))` preserving the timestamp. State derivation is branchless: `mul(iszero(iszero(p)), add(and(p,1), sub(2, lt(timestamp(), shr(1, p)))))` returns 0/1/2/3 for Unset/Waiting/Ready/Done. (3) Predecessor check uses calldataload(opData.offset) to read the first 32 bytes of opData as the predecessor id, then sload(keccak256(0x00, 0x29)) checks its done bit. The combined `or(iszero(b), and(1, sload(...)))` evaluates true if no predecessor (b=0) OR predecessor is done. (4) Re-check after _execute prevents reentrancy: a malicious target call could have called cancel() within the same tx, so we verify the operation is still Ready before marking it done.",
-
+  "explanation": "Comprehensive integration of multiple optimizations: (1) Operation slot derivation uses 41-byte keccak input \u2014 id at offset 0x00 (32 bytes) followed by _TIMELOCK_SLOT at offset 0x09 (9 bytes truncated from 32). The mstore(0x09, _TIMELOCK_SLOT) writes 32 bytes but only the lower 9 are within the keccak range. This packs id+slot-seed into less than the standard 64-byte mapping derivation. (2) Operation state is packed as `(readyTimestamp << 1) | done` \u2014 bit 0 is the done flag, bits [1..255] hold the ready timestamp. propose stores `shl(1, r)` (done=0); execute marks done via `sstore(s, or(1, p))` preserving the timestamp. State derivation is branchless: `mul(iszero(iszero(p)), add(and(p,1), sub(2, lt(timestamp(), shr(1, p)))))` returns 0/1/2/3 for Unset/Waiting/Ready/Done. (3) Predecessor check uses calldataload(opData.offset) to read the first 32 bytes of opData as the predecessor id, then sload(keccak256(0x00, 0x29)) checks its done bit. The combined `or(iszero(b), and(1, sload(...)))` evaluates true if no predecessor (b=0) OR predecessor is done. (4) Re-check after _execute prevents reentrancy: a malicious target call could have called cancel() within the same tx, so we verify the operation is still Ready before marking it done.",
   "gas_saved_mantle": null,
   "gas_saved_l1": null,
   "gas_saved_unit": "per propose/execute",
   "gas_estimate": "high",
   "benchmarked_via": "pending_forge_snapshot",
-
   "risk_level": "high",
   "when_to_apply": "Governance timelocks, multi-step admin operations with execution delay, ERC7821-compatible secure execution flows",
   "when_not_to_apply": "Simple immediate-execution accounts, contexts where the readyTimestamp may exceed 2^254 (centuries in the future)",
-
   "foundry_test": "pending",
   "expected_output_matches": true,
   "forge_snapshot_delta": null
