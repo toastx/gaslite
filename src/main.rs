@@ -683,8 +683,30 @@ async fn retrieve_function_context(
 
 fn strip_code_fences(s: &str) -> String {
     let s = s.trim();
-    let s = s.strip_prefix("```solidity").or_else(|| s.strip_prefix("```")).unwrap_or(s);
-    s.strip_suffix("```").unwrap_or(s).trim().to_string()
+    if !s.contains("```") {
+        return s.to_string();
+    }
+    // Collect only lines that appear inside code fence blocks.
+    // Handles multi-block responses where DeepSeek wraps each function separately.
+    let mut result: Vec<&str> = Vec::new();
+    let mut in_fence = false;
+    let mut found_fence = false;
+    for line in s.lines() {
+        let t = line.trim();
+        if t == "```" || t.starts_with("```solidity") || t.starts_with("```yul") {
+            found_fence = true;
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            result.push(line);
+        }
+    }
+    if found_fence && !result.is_empty() {
+        result.join("\n").trim().to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 async fn create_qdrant_indexes(state: &AppState) -> Result<(), String> {
@@ -946,6 +968,27 @@ fn build_gas_test(orig_name: &str, opt_name: &str) -> String {
     )
 }
 
+// Strip markdown artifacts that DeepSeek sometimes embeds in optimized output:
+// ``` fence markers, **bold** lines, *(italic notes)*, and bullet-point explanations.
+fn clean_for_forge(code: &str) -> String {
+    code.lines()
+        .filter(|line| {
+            let t = line.trim();
+            if t.starts_with("```") { return false; }
+            if t.starts_with("**") { return false; }
+            if t.starts_with("*(") { return false; }
+            // Bullet points that start with an uppercase word are English prose, not Solidity
+            if let Some(rest) = t.strip_prefix("- ") {
+                if rest.trim().chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn collect_forge_errors(stderr: &str) -> Vec<String> {
     stderr.lines()
         .filter(|l| {
@@ -992,8 +1035,11 @@ fn forge_sandbox_inner(forge: &str, root: &Path, original: &str, optimized: &str
         1,
     );
 
-    fs::write(root.join("src/Original.sol"), original).map_err(|e| e.to_string())?;
-    fs::write(root.join("src/Optimized.sol"), &opt_code).map_err(|e| e.to_string())?;
+    let original_clean = clean_for_forge(original);
+    let opt_code_clean = clean_for_forge(&opt_code);
+
+    fs::write(root.join("src/Original.sol"), &original_clean).map_err(|e| e.to_string())?;
+    fs::write(root.join("src/Optimized.sol"), &opt_code_clean).map_err(|e| e.to_string())?;
 
     let mantle_rpc = std::env::var("MANTLE_RPC_URL")
         .unwrap_or_else(|_| "https://rpc.mantle.xyz".to_string());
