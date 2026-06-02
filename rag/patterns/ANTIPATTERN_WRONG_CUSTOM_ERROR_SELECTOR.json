@@ -1,0 +1,43 @@
+{
+  "id": "ANTIPATTERN_WRONG_CUSTOM_ERROR_SELECTOR",
+  "type": "antipattern",
+  "category": "control_flow",
+  "version": "1.0",
+  "title": "Using an invented or incorrect custom error selector instead of the canonical Gaslite selector",
+  "source": "gaslite_error_corpus",
+
+  "trigger_patterns": [
+    "custom error selector assembly revert",
+    "NotOwner revert assembly",
+    "InsufficientBalance selector mstore",
+    "Unauthorized revert assembly",
+    "4-byte error selector invented",
+    "mstore error selector revert 0x1c 0x04",
+    "wrong selector for custom error",
+    "hardcoded error selector incorrect"
+  ],
+
+  "wrong_code": "// WRONG — invented selector 0x4e6c8f80 does not match keccak256(\"NotOwner()\")[0:4]\n// Also wrong: contract never declares 'error NotOwner()' so ABI decoders cannot decode it\nmstore(0x00, 0x4e6c8f80)\nrevert(0x1c, 0x04)",
+
+  "correct_code": "// CORRECT — use the canonical selector from the Gaslite error table\n// NotOwner() = first 4 bytes of keccak256(\"NotOwner()\") = 0x30cd7471\nmstore(0x00, 0x30cd7471)\nrevert(0x1c, 0x04)",
+
+  "explanation": "Custom error selectors are the first 4 bytes of keccak256(errorSignature). Using an invented or guessed 4-byte value produces a revert that no wallet, explorer, or client library can decode. Always use the canonical selectors from the Gaslite error table. The contract must also declare the corresponding custom error (e.g. 'error NotOwner()') for ABI decoders to recognise it.",
+
+  "why_wrong": "A mismatched selector causes wallets and indexers to display 'unknown error' or fall back to the raw hex, making the contract undebuggable. It also breaks any client-side error handling that catches specific custom errors by selector. Using a non-canonical selector like 0x4e6c8f80 instead of 0x30cd7471 for NotOwner() means the revert is semantically equivalent to an undeclared error.",
+
+  "correct_selectors": {
+    "InsufficientBalance()": "0xf4d678b8",
+    "InsufficientAllowance()": "0x13be252b",
+    "TransferFailed()": "0x90b8ec18",
+    "ETHTransferFailed()": "0xb12d13eb",
+    "NotOwner()": "0x30cd7471",
+    "TokenDoesNotExist()": "0xceea21b6",
+    "TokenAlreadyExists()": "0xc991cbb1",
+    "Unauthorized()": "0x82b42900"
+  },
+
+  "gas_impact": "Zero gas difference — this is a correctness and debuggability bug",
+  "risk_level": "critical",
+  "mantle_specific": false,
+  "evm_version": "paris"
+}

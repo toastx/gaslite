@@ -1,0 +1,32 @@
+{
+  "id": "ANTIPATTERN_LOG4_INDEXED_DATA_PAYLOAD",
+  "type": "antipattern",
+  "category": "control_flow",
+  "version": "1.0",
+  "title": "Emitting log4 with non-zero data payload when all event args are indexed",
+  "source": "gaslite_error_corpus",
+
+  "trigger_patterns": [
+    "log4 event emission in assembly",
+    "Transfer event assembly ERC721",
+    "emit Transfer indexed assembly",
+    "log4 with mload topics",
+    "assembly event all indexed args",
+    "log4 memOffset memLen topics from memory",
+    "ERC721 Transfer emit assembly",
+    "log4 0x80 data payload indexed event"
+  ],
+
+  "wrong_code": "// WRONG — passes 128 bytes of memory as data payload AND reads topics from memory\n// All three Transfer args are indexed → data payload must be 0 bytes\nmstore(0x00, 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef)\nmstore(0x20, 0)        // from = address(0)\nmstore(0x40, to)\nmstore(0x60, tokenId)\nlog4(0x00, 0x80, mload(0x00), mload(0x20), mload(0x40), mload(0x60))",
+
+  "correct_code": "// CORRECT — topics are inline args, data payload is (0, 0) since all args are indexed\n// log4(memOffset, memLen, topic0, topic1, topic2, topic3)\nlog4(\n    0, 0,\n    0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef,\n    0,\n    to,\n    tokenId\n)",
+
+  "explanation": "log4(memOffset, memLen, topic0, topic1, topic2, topic3) — the first two args define the non-indexed ABI-encoded data payload. Topics are passed as inline stack values, not memory reads. For ERC721 Transfer(address indexed, address indexed, uint256 indexed), all three parameters are indexed so the data payload must be (0, 0). Passing mload() as topic arguments is redundant and produces the same values as the direct variables, but the 0x80-byte data payload incurs 8 gas per byte = 1,024 extra gas per event emission and pollutes the log with duplicate data.",
+
+  "why_wrong": "log4(0x00, 0x80, ...) emits 128 bytes of unnecessary ABI data alongside the topics. This costs 1,024 extra gas per call (128 bytes × 8 gas/byte) and emits the event signature hash + all args as raw data, which breaks log parsers expecting an empty data field for fully-indexed events. The net result is a 'gas optimization' that costs more gas than the original Solidity emit.",
+
+  "gas_impact": "+1,024 gas per event emission (128 bytes × 8 gas/byte) — this anti-optimization makes mint/transfer MORE expensive than the original",
+  "risk_level": "critical",
+  "mantle_specific": false,
+  "evm_version": "paris"
+}
