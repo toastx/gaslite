@@ -20,6 +20,15 @@ use uuid::Uuid;
 use solang_parser::pt::{ContractPart, Loc, SourceUnitPart};
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 use std::sync::Mutex;
+use async_openai::{
+    Client as OpenAIClient,
+    config::OpenAIConfig,
+    types::{
+        ChatCompletionRequestSystemMessageArgs,
+        ChatCompletionRequestUserMessageArgs,
+        CreateChatCompletionRequestArgs,
+    },
+};
 
 // ── constants ─────────────────────────────────────────────────────────────────
 const COLLECTION: &str = "gaslite_patterns";
@@ -31,7 +40,7 @@ struct AppState {
     turso_url: String,
     turso_token: String,
     qdrant: Qdrant,
-    deepseek_api_key: String,
+    deepseek: OpenAIClient<OpenAIConfig>,
     embedding_model: Mutex<TextEmbedding>,
 }
 
@@ -286,6 +295,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let deepseek_api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY required");
+    let deepseek_base = std::env::var("DEEPSEEK_BASE_URL")
+        .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
+    let deepseek = OpenAIClient::with_config(
+        OpenAIConfig::new()
+            .with_api_base(deepseek_base)
+            .with_api_key(&deepseek_api_key),
+    );
     let qdrant_api_key = std::env::var("QDRANT_API_KEY").expect("QDRANT_API_KEY required");
     let qdrant_url = std::env::var("QDRANT_CLUSTER_URL").expect("QDRANT_CLUSTER_URL required");
     let turso_url = std::env::var("TURSO_DATABASE_URL").expect("TURSO_DATABASE_URL required");
@@ -325,8 +341,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         turso_url: turso_url.clone(),
         turso_token: turso_token.clone(),
         qdrant,
-        deepseek_api_key,
-        embedding_model:Mutex::new(embedding_model)
+        deepseek,
+        embedding_model: Mutex::new(embedding_model),
     });
 
     // run migration via HTTP
@@ -435,12 +451,11 @@ async fn optimize_contract(
     let handles: Vec<tokio::task::JoinHandle<Result<String, String>>> = func_contexts
         .iter()
         .map(|fc| {
-            let http       = state.http.clone();
-            let api_key    = state.deepseek_api_key.clone();
-            let storage    = storage_layout.clone();
-            let func_src   = fc.info.source.clone();
-            let func_name  = fc.info.name.clone();
-            let context    = fc.context.clone();
+            let client   = state.deepseek.clone();
+            let storage  = storage_layout.clone();
+            let func_src = fc.info.source.clone();
+            let func_name = fc.info.name.clone();
+            let context  = fc.context.clone();
 
             tokio::spawn(async move {
                 if context.is_empty() {
@@ -448,7 +463,7 @@ async fn optimize_contract(
                     return Ok(func_src);
                 }
                 info!("  {} → calling DeepSeek ({} ctx chars)", func_name, context.len());
-                call_deepseek(&http, &storage, &func_src, &context, &api_key).await
+                call_deepseek(&client, &storage, &func_src, &context).await
             })
         })
         .collect();
@@ -1106,14 +1121,12 @@ fn forge_sandbox_inner(forge: &str, root: &Path, original: &str, optimized: &str
 }
 
 async fn call_deepseek(
-    client: &reqwest::Client,
+    client: &OpenAIClient<OpenAIConfig>,
     storage_layout: &str,
     function_source: &str,
     context: &str,
-    api_key: &str,
 ) -> Result<String, String> {
-    let system =
-        "You are Gaslite, a gas optimization engine for Mantle L2 EVM contracts.\n\
+    let system = "You are Gaslite, a gas optimization engine for Mantle L2 EVM contracts.\n\
         \n\
         Your role is pattern application and adaptation — not pattern invention.\n\
         \n\
@@ -1143,32 +1156,33 @@ async fn call_deepseek(
         If a pattern genuinely cannot apply even with adaptation, say why in one line and skip it."
     );
 
-    let res = client
-        .post("https://api.deepseek.com/v1/chat/completions")
-        .bearer_auth(api_key)
-        .json(&serde_json::json!({
-            "model": "deepseek-v4-pro[1m]",
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user}
-            ],
-            "temperature": 0.1
-        }))
-        .send()
+    let request = CreateChatCompletionRequestArgs::default()
+        .model("deepseek-v4-flash")
+        .messages([
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(system)
+                .build()
+                .map_err(|e| e.to_string())?
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(user.as_str())
+                .build()
+                .map_err(|e| e.to_string())?
+                .into(),
+        ])
+        .temperature(0.1_f32)
+        .build()
+        .map_err(|e| format!("Failed to build request: {e}"))?;
+
+    let response = client
+        .chat()
+        .create(request)
         .await
         .map_err(|e| format!("DeepSeek request failed: {e}"))?;
 
-    if !res.status().is_success() {
-        return Err(format!("DeepSeek returned status {}", res.status()));
-    }
-
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| format!("DeepSeek parse error: {e}"))?;
-
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or("Missing content in DeepSeek response".to_string())
+    response.choices
+        .into_iter()
+        .next()
+        .and_then(|c| c.message.content)
+        .ok_or_else(|| "Empty response from DeepSeek".to_string())
 }
