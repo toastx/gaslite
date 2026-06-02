@@ -1147,7 +1147,7 @@ async fn call_deepseek(
         .post("https://api.deepseek.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&serde_json::json!({
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-v4-pro[1m]",
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user}
