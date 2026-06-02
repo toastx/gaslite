@@ -1141,6 +1141,34 @@ async fn call_deepseek(
           mstore(0x00, 0xSELECTOR), revert(0x1c, 0x04)\n\
         - Do not invent YUL opcodes, selectors, or patterns not present in the retrieved patterns\n\
         \n\
+        CANONICAL ERROR SELECTORS — use only these, never invent selectors:\n\
+        InsufficientBalance()   0xf4d678b8\n\
+        InsufficientAllowance() 0x13be252b\n\
+        TransferFailed()        0x90b8ec18\n\
+        ETHTransferFailed()     0xb12d13eb\n\
+        NotOwner()              0x30cd7471\n\
+        Unauthorized()          0x82b42900\n\
+        NotApproved()           0xc19f17a9\n\
+        TokenDoesNotExist()     0xceea21b6\n\
+        TokenAlreadyExists()    0xc991cbb1\n\
+        ExceedsMaxSupply()      0xc30436e9\n\
+        ZeroAddress()           0xd92e233d\n\
+        InvalidAmount()         0x2c5211c6\n\
+        InvalidSignature()      0x8baa579f\n\
+        DeadlineExpired()       0x1ab7da6b\n\
+        SlippageExceeded()      0x8199f5f3\n\
+        AlreadyInitialized()    0x0dc149f0\n\
+        NotInitialized()        0x87138d5c\n\
+        Reentrancy()            0xab143c06\n\
+        Paused()                0x9e87fac8\n\
+        InsufficientLiquidity() 0xbb55fd27\n\
+        \n\
+        EVENT EMISSION RULES:\n\
+        - log4(memOffset, memLen, topic0, topic1, topic2, topic3) — topics are inline stack args\n\
+        - When ALL event args are indexed: use log4(0, 0, sig, arg1, arg2, arg3) — data payload is ZERO bytes\n\
+        - When event has non-indexed args: ABI-encode them in memory, then log(offset, len, topics...)\n\
+        - NEVER pass mload() as topic arguments — pass the values directly\n\
+        \n\
         Correctness is absolute. An optimization that changes observable behaviour \
         is not an optimization — it is a bug.";
 

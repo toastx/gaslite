@@ -1,0 +1,58 @@
+{
+  "id": "ERROR_REGISTRY",
+  "type": "pattern",
+  "category": "control_flow",
+  "version": "1.0",
+  "title": "Canonical custom error selectors for Gaslite assembly — always use these exact values",
+  "source": "gaslite_error_corpus",
+
+  "trigger_patterns": [
+    "custom error selector assembly revert",
+    "mstore error selector revert 0x1c 0x04",
+    "InsufficientBalance revert assembly",
+    "NotOwner revert assembly",
+    "Unauthorized revert assembly",
+    "TokenDoesNotExist revert assembly",
+    "ZeroAddress revert assembly",
+    "InvalidAmount revert assembly",
+    "InvalidSignature revert assembly",
+    "Reentrancy revert assembly",
+    "ExceedsMaxSupply revert assembly",
+    "4-byte custom error selector lookup",
+    "what selector for custom error",
+    "error selector table gaslite"
+  ],
+
+  "pattern_before": "// Unknown or invented selector — do NOT guess selectors\nmstore(0x00, 0x????????)\nrevert(0x1c, 0x04)",
+
+  "pattern_after": "// Always use the canonical selector from the registry below\n// Pattern: mstore(0x00, SELECTOR) then revert(0x1c, 0x04)\n\n// ── Core errors ──────────────────────────────────────────────────────\n// InsufficientBalance()    0xf4d678b8\n// InsufficientAllowance()  0x13be252b\n// TransferFailed()         0x90b8ec18\n// ETHTransferFailed()      0xb12d13eb\n// NotOwner()               0x30cd7471\n// Unauthorized()           0x82b42900\n// NotApproved()            0xc19f17a9\n\n// ── Token errors ─────────────────────────────────────────────────────\n// TokenDoesNotExist()      0xceea21b6\n// TokenAlreadyExists()     0xc991cbb1\n// ExceedsMaxSupply()       0xc30436e9\n\n// ── Input validation ─────────────────────────────────────────────────\n// ZeroAddress()            0xd92e233d\n// InvalidAmount()          0x2c5211c6\n// InvalidSignature()       0x8baa579f\n// DeadlineExpired()        0x1ab7da6b\n// SlippageExceeded()       0x8199f5f3\n\n// ── State errors ─────────────────────────────────────────────────────\n// AlreadyInitialized()     0x0dc149f0\n// NotInitialized()         0x87138d5c\n// Reentrancy()             0xab143c06\n// Paused()                 0x9e87fac8\n// InsufficientLiquidity()  0xbb55fd27\n\n// Example usage:\nmstore(0x00, 0xf4d678b8) // InsufficientBalance()\nrevert(0x1c, 0x04)",
+
+  "description": "The definitive selector table for all Gaslite custom errors. Every selector is the first 4 bytes of keccak256(errorSignature) verified with cast sig. NEVER invent or guess selectors. ALWAYS declare the corresponding error in the contract (e.g. error NotOwner();) so ABI decoders can identify reverts. Use revert(0x1c, 0x04) — not revert(0x00, 0x04) — because mstore writes right-aligned so the selector sits at bytes 28-31 (offset 0x1c).",
+
+  "selectors": {
+    "InsufficientBalance()":   "0xf4d678b8",
+    "InsufficientAllowance()": "0x13be252b",
+    "TransferFailed()":        "0x90b8ec18",
+    "ETHTransferFailed()":     "0xb12d13eb",
+    "NotOwner()":              "0x30cd7471",
+    "Unauthorized()":          "0x82b42900",
+    "NotApproved()":           "0xc19f17a9",
+    "TokenDoesNotExist()":     "0xceea21b6",
+    "TokenAlreadyExists()":    "0xc991cbb1",
+    "ExceedsMaxSupply()":      "0xc30436e9",
+    "ZeroAddress()":           "0xd92e233d",
+    "InvalidAmount()":         "0x2c5211c6",
+    "InvalidSignature()":      "0x8baa579f",
+    "DeadlineExpired()":       "0x1ab7da6b",
+    "SlippageExceeded()":      "0x8199f5f3",
+    "AlreadyInitialized()":    "0x0dc149f0",
+    "NotInitialized()":        "0x87138d5c",
+    "Reentrancy()":            "0xab143c06",
+    "Paused()":                "0x9e87fac8",
+    "InsufficientLiquidity()": "0xbb55fd27"
+  },
+
+  "mantle_specific": false,
+  "evm_version": "paris",
+  "risk_level": "critical"
+}
