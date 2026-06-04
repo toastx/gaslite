@@ -1,7 +1,8 @@
 /* Gaslite — savings rail: headline donut, deploy/per-call meters, estimated
    cost saved and a live gas/cost simulation. */
 import { MODEL, FUNCS, PRESETS } from "./data";
-import { AnimatedNum, BarMeter, Donut, SavingsGraph, fmt, fmtGas, fmtMnt } from "./lib";
+import { AnimatedNum, BarMeter, SavingsGraph, fmt, fmtGas, fmtMnt } from "./lib";
+import logo from "./gaslite-mark-white.png";
 
 interface RailProps {
   done: boolean;
@@ -33,9 +34,9 @@ export function Rail({ done, runCount, setRunCount, fnIdx, setFnIdx }: RailProps
     <div className="rail">
       <div className="kicker">Savings summary</div>
 
-      {/* hero donut */}
+      {/* hero logo */}
       <div className="card hero card-anim" style={{ animationDelay: "0ms" }}>
-        <Donut pct={savedPct} run={done} />
+        <img src={logo} alt="Gaslite" className="hero-logo" />
         <div className="meta">
           <div className="big">Up to {Math.round(savedPct)}% cheaper</div>
           <div className="sub">

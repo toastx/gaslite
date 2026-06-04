@@ -5,6 +5,7 @@ import { MODEL, TECHNIQUES, REASONS } from "./data";
 import { MonacoDiff } from "./MonacoDiff";
 import { Rail } from "./Rail";
 import type { Phase } from "./types";
+import brandLogo from "./gaslite-avatar.png";
 
 function OptimizeBtn({ phase, onOptimize, onReset }: { phase: Phase; onOptimize: () => void; onReset: () => void }) {
   if (phase === "analyzing")
@@ -45,7 +46,7 @@ export function App() {
       <div className="topbar">
         <div className="brand">
           <span className="gl-mark">
-            <span className="gl-dot" />
+            <img src={brandLogo} alt="" className="gl-dot" />
             Gaslite
           </span>
         </div>
