@@ -1,0 +1,22 @@
+{
+  "name": "gaslite-webui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Gaslite IDE — Solidity gas-optimization diff viewer (Bun + React + Monaco)",
+  "scripts": {
+    "dev": "bun --hot ./index.html",
+    "build": "bun build ./index.html --outdir dist --minify --sourcemap=linked",
+    "preview": "bun build ./index.html --outdir dist --minify && bunx serve dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "typescript": "^5.6.3"
+  }
+}

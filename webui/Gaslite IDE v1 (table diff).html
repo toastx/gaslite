@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gaslite — Optimize</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --ink:#1f1f23; --ink-2:#5f6368; --ink-3:#9aa0a6;
+    --line:#e9ebee; --line-2:#dde0e4; --surf:#f7f8fa; --surf-2:#f1f3f4;
+    --accent:#1a73e8; --accent-ink:#1558c0; --accent-wash:#e8f0fe;
+    --add-bg:#e7f5ec; --add-ink:#137333; --add-bar:#34a853;
+    --del-bg:#fdecea; --del-ink:#c5221f; --del-bar:#ea4335;
+    --ui:"Figtree",-apple-system,system-ui,sans-serif;
+    --mono:"JetBrains Mono",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{font-family:var(--ui);color:var(--ink);background:#fff;-webkit-font-smoothing:antialiased;overflow:hidden}
+  #root{height:100%}
+  .mono{font-family:var(--mono)}
+  ::selection{background:#cfe1fb}
+
+  /* ---------- topbar ---------- */
+  .topbar{height:56px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 20px;border-bottom:1px solid var(--line);position:relative;z-index:30}
+  .brand{display:flex;align-items:center;gap:18px}
+  .gl-mark{display:inline-flex;align-items:center;gap:9px;font-weight:800;font-size:18px;letter-spacing:-.02em}
+  .gl-dot{width:19px;height:19px;border-radius:6px;background:var(--accent);position:relative;flex:0 0 auto}
+  .gl-dot::after{content:"";position:absolute;inset:5px 7px 6px;background:#fff;border-radius:1.5px}
+  .file-chip{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12.5px;
+    color:var(--ink-2);background:var(--surf-2);border:1px solid var(--line);border-radius:8px;padding:5px 11px}
+  .dotg{width:7px;height:7px;border-radius:9px;background:var(--add-bar)}
+  .top-right{display:flex;align-items:center;gap:14px}
+  .net{font-size:12.5px;color:var(--ink-2);display:flex;align-items:center;gap:7px;white-space:nowrap}
+  .btn{font-family:var(--ui);font-weight:600;font-size:13.5px;border-radius:999px;cursor:pointer;border:1px solid transparent;
+    display:inline-flex;align-items:center;gap:9px;padding:9px 20px;transition:filter .15s,background .15s,box-shadow .15s}
+  .btn-primary{background:var(--accent);color:#fff;box-shadow:0 1px 2px rgba(26,115,232,.35)}
+  .btn-primary:hover{filter:brightness(1.05)}
+  .btn-primary:disabled{opacity:.85;cursor:default}
+  .btn-ghost{background:#fff;color:var(--ink-2);border-color:var(--line-2)}
+  .btn-ghost:hover{background:var(--surf)}
+  .spinner{width:14px;height:14px;border-radius:50%;border:2px solid rgba(255,255,255,.4);border-top-color:#fff;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .check{width:15px;height:15px}
+
+  /* ---------- main grid ---------- */
+  .main{display:grid;grid-template-columns:1fr 1fr 384px;height:calc(100% - 56px)}
+  .pane{display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--line)}
+  .pane-head{height:42px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;
+    padding:0 18px;border-bottom:1px solid var(--line);font-size:12px;font-weight:600;color:var(--ink-2)}
+  .pane-body{flex:1;overflow:auto;position:relative}
+  .editor-wrap{display:grid;grid-template-columns:1fr 1fr;grid-column:1 / 3}
+  /* two editors share one scroll region for perfect row alignment */
+  .editors{grid-column:1 / span 2;position:relative;overflow:auto}
+  .ed-headrow{display:grid;grid-template-columns:1fr 1fr;position:sticky;top:0;z-index:5;background:#fff}
+  .ed-head{height:42px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 18px;border-bottom:1px solid var(--line);border-right:1px solid var(--line);font-size:12px;font-weight:600;color:var(--ink-2)}
+  .ed-head:last-child{border-right:none}
+  .pill-save{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:var(--add-ink);
+    background:var(--add-bg);border-radius:999px;padding:2px 9px}
+
+  /* ---------- diff table ---------- */
+  .diff-shell{position:relative}
+  .diff-table{font-family:var(--mono);font-size:12.5px;line-height:1.72}
+  .diff-row{display:grid;grid-template-columns:1fr 1fr}
+  .cell{display:flex;align-items:flex-start;border-right:1px solid var(--line);min-height:21.5px}
+  .cell:last-child{border-right:none;position:relative}
+  .gut{width:40px;flex:0 0 auto;text-align:right;padding-right:13px;color:#c4c8ce;user-select:none}
+  .src{white-space:pre;padding-right:14px;tab-size:2;color:var(--ink)}
+  .cell-ctx{background:#fff}
+  .cell-del{background:var(--del-bg)} .cell-del .gut{color:#e6a8a2}
+  .cell-add{background:var(--add-bg)} .cell-add .gut{color:#8fcfa6}
+  .cell-pending{background:repeating-linear-gradient(180deg,#fbfcfd 0 21.5px)}
+  .cell-reveal{animation:rowIn .42s cubic-bezier(.2,.7,.3,1) both}
+  @keyframes rowIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+  .diff-row.has-why .cell:last-child{cursor:help}
+  .diff-row.row-hover .cell-add,.diff-row.row-hover .cell-del{filter:brightness(.97)}
+  .diff-row.row-hover .cell:last-child::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent)}
+  .diff-gap{grid-column:1/3;display:flex;align-items:center;gap:14px;padding:5px 18px;color:var(--ink-3);
+    font-size:10.5px;font-family:var(--ui);font-weight:600;letter-spacing:.04em;text-transform:uppercase;background:var(--surf)}
+  .diff-gap-line{height:1px;background:var(--line-2);flex:1}
+
+  /* syntax */
+  .t-kw{color:#8430ce}.t-ty{color:#1a73e8}.t-fn{color:#0b8043}.t-nu{color:#b06000}.t-st{color:#c5221f}.t-cm{color:#9aa0a6}
+
+  /* why popover */
+  .why-pop{position:absolute;top:calc(100% + 6px);right:10px;width:280px;z-index:40;
+    background:#fff;border:1px solid var(--line-2);border-radius:12px;padding:13px 14px;
+    box-shadow:0 12px 34px rgba(20,30,50,.16);font-family:var(--ui);animation:popIn .16s ease both;cursor:default}
+  @keyframes popIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  .why-tag{display:inline-block;font-family:var(--mono);font-size:10.5px;font-weight:600;color:var(--accent-ink);
+    background:var(--accent-wash);border-radius:6px;padding:2px 7px;margin-bottom:8px}
+  .why-title{font-size:13px;font-weight:700;letter-spacing:-.01em;margin-bottom:5px}
+  .why-body{font-size:12px;line-height:1.5;color:var(--ink-2)}
+  .why-gas{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding-top:9px;
+    border-top:1px solid var(--line);font-size:11.5px;color:var(--ink-3)}
+  .why-gas b{font-family:var(--mono);color:var(--add-ink);font-size:12px}
+
+  /* analyzing scanline */
+  .scan{position:absolute;left:0;right:0;height:120px;pointer-events:none;z-index:6;
+    background:linear-gradient(180deg,transparent,rgba(26,115,232,.10) 60%,rgba(26,115,232,.22));
+    border-bottom:1.5px solid var(--accent);animation:scan 1.4s cubic-bezier(.4,0,.4,1) infinite}
+  @keyframes scan{0%{top:-120px}100%{top:100%}}
+
+  /* right-pane overlay (idle/analyzing) */
+  .ov{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    text-align:center;padding:30px;background:rgba(252,253,254,.86);backdrop-filter:blur(1.5px);z-index:8}
+  .ov h3{font-size:15px;font-weight:700;margin:0 0 9px}
+  .ov p{font-size:12.5px;color:var(--ink-2);margin:0;max-width:240px;line-height:1.5}
+  .ov .ring{width:34px;height:34px;border-radius:50%;border:3px solid var(--accent-wash);border-top-color:var(--accent);
+    animation:spin .8s linear infinite;margin-bottom:16px}
+  .tech-chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:16px;max-width:280px}
+  .tech-chip{font-family:var(--mono);font-size:10.5px;color:var(--accent-ink);background:var(--accent-wash);
+    border-radius:6px;padding:3px 8px;opacity:0;animation:chipIn .3s ease forwards}
+  @keyframes chipIn{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:scale(1)}}
+
+  /* ---------- stats rail ---------- */
+  .rail{background:var(--surf);overflow-y:auto;padding:18px 16px 30px;display:flex;flex-direction:column;gap:13px}
+  .rail-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--ink-3);gap:12px;padding:30px}
+  .rail-empty .glyph{width:46px;height:46px;border-radius:13px;background:#fff;border:1px solid var(--line);display:flex;align-items:center;justify-content:center}
+  .rail-empty .glyph::after{content:"";width:18px;height:18px;border-radius:5px;background:var(--surf-2)}
+  .kicker{font-size:10.5px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3)}
+  .card{background:#fff;border:1px solid var(--line);border-radius:15px;padding:16px}
+  .card-anim{animation:cardIn .5s cubic-bezier(.2,.7,.3,1) both}
+  @keyframes cardIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  .hero{background:var(--accent);color:#fff;border:none;display:flex;align-items:center;gap:16px;padding:18px}
+  .hero .meta{flex:1}
+  .hero .meta .big{font-size:15px;font-weight:700;letter-spacing:-.01em}
+  .hero .meta .sub{font-size:12px;opacity:.85;margin-top:5px;line-height:1.45}
+  .lab{font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.01em}
+  .val{font-size:23px;font-weight:800;letter-spacing:-.03em;line-height:1;margin-top:6px}
+  .delta{font-family:var(--mono);font-size:11px;color:var(--ink-2);margin-top:7px}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+  .pos{color:var(--add-ink)}
+  .fnsel{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
+  .fnbtn{font-family:var(--mono);font-size:11px;font-weight:500;color:var(--ink-2);background:var(--surf-2);
+    border:1px solid transparent;border-radius:7px;padding:4px 9px;cursor:pointer;transition:all .14s}
+  .fnbtn:hover{background:#eceef1}
+  .fnbtn.on{background:var(--accent-wash);color:var(--accent-ink);border-color:#cfe1fb}
+
+  /* slider */
+  .slider{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:9px;
+    background:var(--surf-2);outline:none;margin:0}
+  .slider::-webkit-slider-thumb{-webkit-appearance:none;width:17px;height:17px;border-radius:50%;
+    background:#fff;border:2.5px solid var(--accent);cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.18);transition:transform .1s}
+  .slider::-webkit-slider-thumb:active{transform:scale(1.15)}
+  .slider::-moz-range-thumb{width:17px;height:17px;border-radius:50%;background:#fff;border:2.5px solid var(--accent);cursor:pointer}
+  .presets{display:flex;gap:5px;margin-top:11px;flex-wrap:wrap}
+  .preset{font-family:var(--mono);font-size:10.5px;font-weight:500;color:var(--ink-2);background:var(--surf-2);
+    border:1px solid transparent;border-radius:6px;padding:3px 8px;cursor:pointer;transition:all .14s}
+  .preset:hover{background:#eceef1}
+  .preset.on{background:var(--accent);color:#fff}
+  .simrow{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;margin-top:10px}
+  .simrow .k{color:var(--ink-2)}
+  .simrow .v{font-family:var(--mono);font-weight:600}
+  .assume{font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-top:11px;text-align:center}
+
+  /* graph draw */
+  .graph-draw .gline{stroke-dasharray:1;stroke-dashoffset:1;animation:draw 1.05s ease forwards}
+  .graph-draw .gline-before{animation-delay:.18s}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  .legend{display:flex;gap:14px;margin-top:6px;font-size:10.5px;color:var(--ink-2)}
+  .legend i{display:inline-block;width:12px;height:2.5px;border-radius:2px;margin-right:5px;vertical-align:middle}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="gaslite/data.js"></script>
+<script type="text/babel" src="gaslite/ui.jsx"></script>
+
+<script type="text/babel">
+const { useState } = React;
+
+function OptimizeBtn({ phase, onOptimize, onReset }) {
+  if (phase === "analyzing")
+    return <button className="btn btn-primary" disabled><span className="spinner" />Analyzing…</button>;
+  if (phase === "done")
+    return <button className="btn btn-ghost" onClick={onReset}>↺ Reset</button>;
+  return <button className="btn btn-primary" onClick={onOptimize}>Optimize contract</button>;
+}
+
+function Rail({ done, runCount, setRunCount, fnIdx, setFnIdx }) {
+  const M = window.GL.MODEL, FUNCS = window.GL.FUNCS, PRESETS = window.GL.PRESETS;
+  const savedGas = M.savedGas(runCount);
+  const savedPct = M.savedPct(runCount) * 100;
+  const mnt = M.gasToMnt(savedGas), usd = M.gasToUsd(savedGas);
+  const fn = FUNCS[fnIdx], fnPct = (1 - fn.after / fn.before) * 100;
+  const dep = M.deploy, depPct = (1 - dep.after / dep.before) * 100;
+
+  // slider position from runCount (log)
+  const sliderVal = runCount <= 1 ? 0 : Math.round((Math.log10(runCount) / 6) * 600);
+  const onSlide = (e) => {
+    const v = +e.target.value;
+    setRunCount(v === 0 ? 1 : Math.round(Math.pow(10, (v / 600) * 6)));
+  };
+  const runLabel = runCount === 0 ? "deploy only" : window.glFmt(runCount) + " calls";
+
+  return (
+    <div className="rail">
+      <div className="kicker">Savings summary</div>
+
+      {/* hero donut */}
+      <div className="card hero card-anim" style={{ animationDelay: "0ms" }}>
+        <Donut pct={savedPct} run={done} />
+        <div className="meta">
+          <div className="big">Up to {Math.round(savedPct)}% cheaper</div>
+          <div className="sub">Blended across deployment and {runLabel}. 7 optimizations applied automatically.</div>
+        </div>
+      </div>
+
+      {/* deploy + per-call */}
+      <div className="row2">
+        <div className="card card-anim" style={{ animationDelay: "70ms" }}>
+          <div className="lab">Deployment</div>
+          <div className="val pos">−<AnimatedNum value={depPct} run={done} format={(x) => x.toFixed(0)} />%</div>
+          <div className="delta">{fmtGas(dep.before)} → {fmtGas(dep.after)}</div>
+          <div style={{ marginTop: 10 }}><BarMeter before={dep.before} after={dep.after} run={done} /></div>
+        </div>
+        <div className="card card-anim" style={{ animationDelay: "130ms" }}>
+          <div className="lab">Per call</div>
+          <div className="val pos">−<AnimatedNum value={fnPct} run={done} format={(x) => x.toFixed(0)} duration={500} />%</div>
+          <div className="delta">{window.glFmt(fn.before - fn.after)} gas saved</div>
+          <div style={{ marginTop: 10 }}><BarMeter before={fn.before} after={fn.after} run={done} /></div>
+          <div className="fnsel">
+            {FUNCS.map((f, i) => (
+              <button key={f.name} className={"fnbtn" + (i === fnIdx ? " on" : "")} onClick={() => setFnIdx(i)}>{f.name}()</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* cost saved */}
+      <div className="card card-anim" style={{ animationDelay: "190ms" }}>
+        <div className="lab">Estimated cost saved · {runLabel}</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginTop: 6 }}>
+          <div className="val mono" style={{ color: "var(--ink)" }}>
+            <AnimatedNum value={mnt} run={done} format={fmtMnt} /> <span style={{ fontSize: 13, color: "var(--ink-3)" }}>MNT</span></div>
+          <div className="val mono" style={{ fontSize: 18, color: "var(--ink-3)" }}>
+            ≈ $<AnimatedNum value={usd} run={done} format={(x) => x < 0.01 ? x.toFixed(4) : x.toFixed(2)} /></div>
+        </div>
+        <div className="delta"><AnimatedNum value={savedGas} run={done} format={fmtGas} /> gas saved total</div>
+      </div>
+
+      {/* simulation */}
+      <div className="card card-anim" style={{ animationDelay: "250ms" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <div className="kicker" style={{ color: "var(--ink-2)" }}>Simulation</div>
+          <div className="mono" style={{ fontSize: 11, color: "var(--accent-ink)", fontWeight: 600 }}>{runLabel}</div>
+        </div>
+        <SavingsGraph runCount={Math.max(runCount, 1)} run={done} width={350} height={172} />
+        <div className="legend">
+          <span><i style={{ background: "var(--del-bar)" }} />Original</span>
+          <span><i style={{ background: "var(--accent)" }} />Gaslite</span>
+        </div>
+        <input className="slider" type="range" min="0" max="600" step="1" value={sliderVal} onChange={onSlide}
+          style={{ marginTop: 12 }} />
+        <div className="presets">
+          {PRESETS.map((p) => (
+            <button key={p.label} className={"preset" + (runCount === p.runs || (p.runs === 0 && runCount <= 1) ? " on" : "")}
+              onClick={() => setRunCount(p.runs)}>{p.label}</button>
+          ))}
+        </div>
+        <div className="simrow"><span className="k">Original</span><span className="v" style={{ color: "var(--del-ink)" }}>{window.glFmt(M.cumBefore(runCount))} gas</span></div>
+        <div className="simrow"><span className="k">With Gaslite</span><span className="v pos">{window.glFmt(M.cumAfter(runCount))} gas</span></div>
+        <div className="assume">assumes {M.gasPriceGwei} Gwei · MNT ${M.mntUsd} on Mantle</div>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [phase, setPhase] = useState("idle");
+  const [runCount, setRunCount] = useState(100000);
+  const [fnIdx, setFnIdx] = useState(0);
+  const done = phase === "done";
+
+  const optimize = () => { setPhase("analyzing"); setTimeout(() => setPhase("done"), 1600); };
+  const reset = () => setPhase("idle");
+
+  const TECH = window.GL.TECHNIQUES, REASONS = window.GL.REASONS;
+
+  return (
+    <React.Fragment>
+      {/* topbar */}
+      <div className="topbar">
+        <div className="brand">
+          <span className="gl-mark"><span className="gl-dot" />Gaslite</span>
+          <span className="file-chip"><span className="dotg" />RewardPool.sol</span>
+        </div>
+        <div className="top-right">
+          <span className="net"><span className="dotg" />Mantle Mainnet</span>
+          <OptimizeBtn phase={phase} onOptimize={optimize} onReset={reset} />
+        </div>
+      </div>
+
+      {/* main */}
+      <div className="main">
+        {/* editors (two columns, shared scroll) */}
+        <div className="editors" style={{ gridColumn: "1 / span 2", display: "flex", flexDirection: "column" }}>
+          <div className="ed-headrow">
+            <div className="ed-head"><span>Original</span><span className="mono" style={{ color: "var(--ink-3)" }}>baseline</span></div>
+            <div className="ed-head">
+              <span style={{ color: done ? "var(--accent-ink)" : "var(--ink-2)" }}>Optimized by Gaslite</span>
+              {done && <span className="pill-save">−{Math.round(window.GL.MODEL.savedPct(runCount) * 100)}%</span>}
+            </div>
+          </div>
+          <div className="diff-shell" style={{ position: "relative", flex: 1, overflow: "auto" }}>
+            <DiffTable revealed={done} onWhy={() => {}} />
+            {phase === "analyzing" && <div className="scan" />}
+            {phase !== "done" && (
+              <div className="ov" style={{ left: "50%" }}>
+                {phase === "analyzing" ? (
+                  <React.Fragment>
+                    <div className="ring" />
+                    <h3>Analyzing bytecode…</h3>
+                    <p>Gaslite is rewriting storage layout, calldata usage and control flow.</p>
+                    <div className="tech-chips">
+                      {TECH.map((t, i) => (
+                        <span key={t} className="tech-chip" style={{ animationDelay: (i * 140) + "ms" }}>{REASONS[t].tag}</span>
+                      ))}
+                    </div>
+                  </React.Fragment>
+                ) : (
+                  <React.Fragment>
+                    <h3>Optimized output</h3>
+                    <p>Press <b>Optimize contract</b> to rewrite this Solidity for minimum gas — behaviour stays identical.</p>
+                  </React.Fragment>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* stats rail */}
+        {done ? (
+          <Rail done={done} runCount={runCount} setRunCount={setRunCount} fnIdx={fnIdx} setFnIdx={setFnIdx} />
+        ) : (
+          <div className="rail">
+            <div className="rail-empty">
+              <div className="glyph" />
+              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-2)" }}>Savings appear here</div>
+              <div style={{ fontSize: 12, maxWidth: 220 }}>Run Gaslite to see gas saved per call, deploy savings and a live cost simulation.</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </React.Fragment>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
