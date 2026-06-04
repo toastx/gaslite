@@ -1,0 +1,27 @@
+# build output
+/target
+**/target
+
+# secrets & local env (inject at runtime instead)
+.env
+Secrets*.toml
+
+# vcs / tooling
+.git
+.gitignore
+.claude
+.kilo
+.vscode
+
+# model cache (re-downloaded in the container)
+.fastembed_cache
+
+# unrelated subprojects / vendored code
+webui
+vscode
+solady
+
+# docs & images
+*.md
+**/screenshots
+**/*.png
