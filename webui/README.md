@@ -47,8 +47,9 @@ src/
 contract** kicks off a short "analyzing" animation (scanline + technique chips),
 then reveals the optimized source in the right Monaco pane, anchors an accent bar
 + hover popover on each changed line (`data.ts → OPTIMIZATIONS`), and animates the
-savings rail in. **Reset** returns to idle, where the right pane mirrors edits you
-make in the (editable) original pane.
+savings rail in. The editor is frozen (read-only, no scroll) until you hit
+Optimize, so the view stays still; once optimized it becomes scrollable.
+**Reset** returns to the frozen idle state.
 
 All gas/cost numbers come from the `MODEL` in `src/data.ts` and are illustrative
 but internally consistent — swap them for real `forge` output to make it live.

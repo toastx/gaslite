@@ -48,10 +48,6 @@ export function App() {
             <span className="gl-dot" />
             Gaslite
           </span>
-          <span className="file-chip">
-            <span className="dotg" />
-            RewardPool.sol
-          </span>
         </div>
         <div className="top-right">
           <span className="net">

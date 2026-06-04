@@ -219,6 +219,26 @@ export function MonacoDiff({ phase }: { phase: Phase }) {
     const r = refs.current;
     const { monaco, modified, me, diff } = r;
     setWhy(null);
+
+    // before Optimize, freeze the editor — no scroll, no edits, pinned to top
+    const locked = phase !== "done";
+    const lockScroll = {
+      vertical: locked ? "hidden" : "auto",
+      horizontal: locked ? "hidden" : "auto",
+      handleMouseWheel: !locked,
+      alwaysConsumeMouseWheel: false,
+      verticalScrollbarSize: 10,
+      horizontalScrollbarSize: 10,
+      useShadows: false,
+    };
+    r.oe.updateOptions({ readOnly: locked, domReadOnly: locked, scrollBeyondLastLine: false, scrollbar: lockScroll });
+    me.updateOptions({ scrollBeyondLastLine: false, scrollbar: lockScroll });
+    if (locked) {
+      r.oe.setScrollTop(0);
+      r.oe.setScrollLeft(0);
+      me.setScrollTop(0);
+      me.setScrollLeft(0);
+    }
     if (r.deco) {
       r.deco.clear();
       r.deco = null;
