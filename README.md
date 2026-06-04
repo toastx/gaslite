@@ -1,6 +1,8 @@
 <div align="center">
 
-# ⛽ Gaslite
+<img src="public/logo/gaslite-avatar-rounded-400.png" alt="Gaslite" width="120" height="120" />
+
+# Gaslite
 
 **An AI gas-optimization engine for Solidity, tuned for the Mantle L2.**
 
