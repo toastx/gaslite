@@ -13,8 +13,7 @@
     "skipLibCheck": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
-    "forceConsistentCasingInFileNames": true,
-    "types": ["bun-types", "react", "react-dom"]
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "index.html"]
+  "include": ["src"]
 }
