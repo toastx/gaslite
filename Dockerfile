@@ -2,9 +2,12 @@
 
 ###############################################################################
 # Stage 1 — build the Rust service
-# Use the full Debian-based Rust image so glibc/openssl match the slim runtime.
+# Debian 13 "trixie" ships glibc 2.41. This is required: fastembed -> ort pulls
+# a PREBUILT static ONNX Runtime compiled against glibc >= 2.38 (it references
+# __isoc23_strtol & friends), so older bases like bookworm (glibc 2.36) fail to
+# link with "undefined symbol: __isoc23_strtoull".
 ###############################################################################
-FROM rust:1-bookworm AS builder
+FROM rust:1-trixie AS builder
 
 # Build deps: pkg-config + libssl-dev for reqwest's default (native) TLS,
 # ca-certificates so ort/fastembed can download the ONNX Runtime at build time.
@@ -30,25 +33,27 @@ COPY src ./src
 # bump mtime so cargo recompiles the real binary over the cached stub
 RUN touch src/main.rs && cargo build --release
 
-# Stage the runtime artifacts: the binary plus the ONNX Runtime shared library
-# that the `ort` crate downloads next to it (fastembed depends on it).
+# Stage the runtime artifacts. ONNX Runtime is statically linked into the binary
+# here, so normally there is no .so to ship — the find is just defensive in case
+# a future ort config produces a dynamic libonnxruntime.
 RUN mkdir -p /out \
     && cp target/release/gaslite /out/ \
     && find target/release -maxdepth 3 -name 'libonnxruntime*.so*' -exec cp -P {} /out/ \; || true
 
 ###############################################################################
-# Stage 2 — slim runtime
+# Stage 2 — slim runtime (trixie to match the builder's glibc 2.41)
 ###############################################################################
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 # Runtime libs:
 #   ca-certificates  -> TLS to DeepSeek / Qdrant / Turso / Mantle RPC
-#   libssl3          -> reqwest native-tls
+#   openssl          -> pulls the correct libssl for reqwest's native-tls
+#                       (avoids the libssl3 vs libssl3t64 naming churn)
 #   libgomp1         -> OpenMP, required by ONNX Runtime
-#   libstdc++6       -> C++ runtime for ONNX Runtime
+#   libstdc++6       -> C++ runtime for the statically linked ONNX Runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
-        libssl3 \
+        openssl \
         libgomp1 \
         libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
@@ -59,7 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd --create-home --uid 10001 gaslite
 WORKDIR /app
 
-# Binary + ONNX Runtime .so (kept beside the binary to satisfy its $ORIGIN rpath)
+# Binary (plus any ONNX Runtime .so, kept beside it to satisfy a $ORIGIN rpath)
 COPY --from=builder /out/ /app/
 # Knowledge base files (point the ingest endpoint at /app/rag/functions etc.)
 COPY rag ./rag
