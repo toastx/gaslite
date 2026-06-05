@@ -55,6 +55,14 @@ export function App() {
             <span className="dotg" />
             Mantle Mainnet
           </span>
+          <a
+            className="analytics-link"
+            href="https://gaslite-analytics.onrender.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Analytics
+          </a>
           <OptimizeBtn phase={phase} onOptimize={optimize} onReset={reset} />
         </div>
       </div>
