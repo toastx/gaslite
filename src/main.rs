@@ -384,17 +384,123 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/admin/qdrant/reset", post(reset_collection))
         .with_state(state);
 
+    spawn_pinger();
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await?;
     info!("Gaslite listening on {}", listener.local_addr()?);
     axum::serve(listener, router).await?;
     Ok(())
 }
 
+fn spawn_pinger() {
+    const DEFAULT_URL: &str = "https://gaslite-analytics.onrender.com/api/status";
+    const DEFAULT_INTERVAL_SECS: u64 = 300;
+
+    let url = std::env::var("PING_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
+    let interval_secs = std::env::var("PING_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_INTERVAL_SECS);
+
+    tokio::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                error!("pinger: failed to build HTTP client: {e}");
+                return;
+            }
+        };
+
+        info!("pinger: targeting {url} every {interval_secs}s");
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        loop {
+            ticker.tick().await;
+            let started = std::time::Instant::now();
+            match client.get(&url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let ms = started.elapsed().as_millis();
+                    if status.is_success() {
+                        info!("pinger: OK {status} in {ms}ms");
+                    } else {
+                        warn!("pinger: non-2xx {status} in {ms}ms");
+                    }
+                }
+                Err(e) => warn!("pinger: request failed: {e}"),
+            }
+        }
+    });
+}
+
 // ── handlers ──────────────────────────────────────────────────────────────────
 
-async fn health_check() -> &'static str {
+// ── health check ──────────────────────────────────────────────────────────────
+#[derive(Serialize)]
+struct ComponentHealth {
+    status: &'static str, // "ok" | "down"
+    latency_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HealthChecks {
+    turso: ComponentHealth,
+    qdrant: ComponentHealth,
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str, // "ok" | "degraded"
+    service: &'static str,
+    server: &'static str, // "ok" — if this handler runs, the server is up
+    checks: HealthChecks,
+}
+
+async fn health_check(
+    State(state): State<Arc<AppState>>,
+) -> (axum::http::StatusCode, Json<HealthResponse>) {
     info!("GET /health");
-    "Gaslite Engine is online."
+
+    // Turso (structured store) — cheapest possible round-trip.
+    let t = std::time::Instant::now();
+    let turso = match state.turso_query("SELECT 1", vec![]).await {
+        Ok(_) => ComponentHealth { status: "ok", latency_ms: t.elapsed().as_millis(), error: None },
+        Err(e) => {
+            warn!("health: turso check failed: {e}");
+            ComponentHealth { status: "down", latency_ms: t.elapsed().as_millis(), error: Some(e) }
+        }
+    };
+
+    // Qdrant (vector store) — listing collections is a lightweight connectivity probe.
+    let q = std::time::Instant::now();
+    let qdrant = match state.qdrant.list_collections().await {
+        Ok(_) => ComponentHealth { status: "ok", latency_ms: q.elapsed().as_millis(), error: None },
+        Err(e) => {
+            warn!("health: qdrant check failed: {e}");
+            ComponentHealth { status: "down", latency_ms: q.elapsed().as_millis(), error: Some(e.to_string()) }
+        }
+    };
+
+    let healthy = turso.status == "ok" && qdrant.status == "ok";
+    let code = if healthy {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        code,
+        Json(HealthResponse {
+            status: if healthy { "ok" } else { "degraded" },
+            service: "gaslite",
+            server: "ok",
+            checks: HealthChecks { turso, qdrant },
+        }),
+    )
 }
 
 async fn optimize_contract(
