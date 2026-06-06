@@ -1,5 +1,11 @@
 //TODO erc1155
 
+mod ai;
+mod db;
+
+use ai::Embedder;
+use db::{Turso, TursoArg};
+
 use tracing::{info, warn, error};
 use axum::{
     extract::State,
@@ -12,22 +18,14 @@ use qdrant_client::{Payload, qdrant::{
 use qdrant_client::qdrant::{CreateFieldIndexCollectionBuilder, FieldType};
 use qdrant_client::Qdrant;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 use solang_parser::pt::{ContractPart, Loc, SourceUnitPart};
-use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
-use std::sync::Mutex;
 use async_openai::{
     Client as OpenAIClient,
     config::OpenAIConfig,
-    types::{
-        ChatCompletionRequestSystemMessageArgs,
-        ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs,
-    },
 };
 
 // ── constants ─────────────────────────────────────────────────────────────────
@@ -36,81 +34,10 @@ const VECTOR_DIM: u64 = 384;
 
 // ── app state ─────────────────────────────────────────────────────────────────
 struct AppState {
-    http: reqwest::Client,
-    turso_url: String,
-    turso_token: String,
+    db: Turso,
     qdrant: Qdrant,
     deepseek: OpenAIClient<OpenAIConfig>,
-    embedding_model: Mutex<TextEmbedding>,
-}
-
-// ── turso HTTP types ──────────────────────────────────────────────────────────
-#[derive(Serialize)]
-struct TursoRequest {
-    requests: Vec<TursoStatement>,
-}
-
-#[derive(Serialize)]
-struct TursoStatement {
-    #[serde(rename = "type")]
-    stmt_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stmt: Option<TursoStmtInner>, // Now points to an inner struct
-}
-
-#[derive(Serialize)]
-struct TursoStmtInner {
-    sql: String,
-    args: Vec<TursoArg>,
-}
-
-// Hrana requires args to look like {"type": "text", "value": "foo"}
-// This exact serde macro configuration achieves that automatically.
-#[derive(Serialize, Clone)]
-#[serde(tag = "type", content = "value")]
-enum TursoArg {
-    #[serde(rename = "text")]
-    Text(String),
-    #[serde(rename = "integer")]
-    Integer(String),
-    #[serde(rename = "null")]
-    Null,
-}
-
-#[derive(Deserialize, Debug)]
-struct TursoResponse {
-    results: Vec<TursoResult>,
-}
-
-#[derive(Deserialize, Debug)]
-struct TursoResult {
-    #[serde(rename = "type")]
-    result_type: String,
-    response: Option<TursoResultResponse>,
-    error: Option<TursoError>,
-}
-
-#[derive(Deserialize, Debug)]
-struct TursoResultResponse {
-    #[serde(rename = "type")]
-    response_type: String,
-    result: Option<TursoRows>,
-}
-
-#[derive(Deserialize, Debug)]
-struct TursoRows {
-    cols: Vec<TursoCol>,
-    rows: Vec<Vec<serde_json::Value>>,
-}
-
-#[derive(Deserialize, Debug)]
-struct TursoCol {
-    name: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct TursoError {
-    message: String,
+    embedder: Arc<Embedder>,
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
@@ -162,125 +89,6 @@ struct FunctionInfo {
     ops: Vec<String>,
 }
 
-// ── turso HTTP client ─────────────────────────────────────────────────────────
-impl AppState {
-    async fn turso_execute(
-        &self,
-        sql: &str,
-        args: Vec<TursoArg>,
-    ) -> Result<(), String> {
-        let stmts = vec![
-            TursoStatement {
-                stmt_type: "execute".to_string(),
-                stmt: Some(TursoStmtInner {
-                    sql: sql.to_string(),
-                    args,
-                }),
-            },
-            TursoStatement {
-                stmt_type: "close".to_string(),
-                stmt: None,
-            },
-        ];
-
-        let res = self
-            .http
-            .post(format!("{}/v2/pipeline", self.turso_url))
-            .bearer_auth(&self.turso_token)
-            .json(&TursoRequest { requests: stmts })
-            .send()
-            .await
-            .map_err(|e| format!("Turso request failed: {e}"))?;
-
-        if !res.status().is_success() {
-            return Err(format!("Turso returned status {}", res.status()));
-        }
-
-        let body: TursoResponse = res
-            .json()
-            .await
-            .map_err(|e| format!("Turso parse error: {e}"))?;
-
-        // check for errors in results
-        for result in &body.results {
-            if let Some(err) = &result.error {
-                return Err(format!("Turso SQL error: {}", err.message));
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn turso_query(
-        &self,
-        sql: &str,
-        args: Vec<TursoArg>,
-    ) -> Result<Vec<HashMap<String, serde_json::Value>>, String> {
-        let stmts = vec![
-            TursoStatement {
-                stmt_type: "execute".to_string(),
-                stmt: Some(TursoStmtInner {
-                    sql: sql.to_string(),
-                    args,
-                }),
-            },
-            TursoStatement {
-                stmt_type: "close".to_string(),
-                stmt: None,
-            },
-        ];
-
-        let res = self
-            .http
-            .post(format!("{}/v2/pipeline", self.turso_url))
-            .bearer_auth(&self.turso_token)
-            .json(&TursoRequest { requests: stmts })
-            .send()
-            .await
-            .map_err(|e| format!("Turso request failed: {e}"))?;
-
-        if !res.status().is_success() {
-            return Err(format!("Turso returned status {}", res.status()));
-        }
-
-        let body: TursoResponse = res
-            .json()
-            .await
-            .map_err(|e| format!("Turso parse error: {e}"))?;
-
-        // extract rows from first execute result
-        for result in &body.results {
-            if let Some(err) = &result.error {
-                return Err(format!("Turso SQL error: {}", err.message));
-            }
-            if result.result_type == "ok" {
-                if let Some(resp) = &result.response {
-                    if let Some(rows_data) = &resp.result {
-                        let col_names: Vec<&str> =
-                            rows_data.cols.iter().map(|c| c.name.as_str()).collect();
-
-                        let rows = rows_data
-                            .rows
-                            .iter()
-                            .map(|row| {
-                                col_names
-                                    .iter()
-                                    .zip(row.iter())
-                                    .map(|(col, val)| (col.to_string(), val.clone()))
-                                    .collect::<HashMap<String, serde_json::Value>>()
-                            })
-                            .collect();
-
-                        return Ok(rows);
-                    }
-                }
-            }
-        }
-
-        Ok(vec![])
-    }
-}
-
 // ── entry point ───────────────────────────────────────────────────────────────
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -309,11 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
     let http = reqwest::Client::new();
-    let embedding_model = TextEmbedding::try_new(
-    InitOptions::new(EmbeddingModel::BGESmallENV15)
-        .with_show_download_progress(true)
-    )?;
-    
+    let embedder = Embedder::new()?;
 
     // qdrant
     let qdrant = Qdrant::from_url(&qdrant_url)
@@ -337,17 +141,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let state = Arc::new(AppState {
-        http: http.clone(),
-        turso_url: turso_url.clone(),
-        turso_token: turso_token.clone(),
+        db: Turso::new(http, turso_url, turso_token),
         qdrant,
         deepseek,
-        embedding_model: Mutex::new(embedding_model),
+        embedder,
     });
 
     // run migration via HTTP
     state
-        .turso_execute(
+        .db
+        .execute(
             "CREATE TABLE IF NOT EXISTS optimization_patterns (
                 id                TEXT PRIMARY KEY,
                 category          TEXT,
@@ -467,7 +270,7 @@ async fn health_check(
 
     // Turso (structured store) — cheapest possible round-trip.
     let t = std::time::Instant::now();
-    let turso = match state.turso_query("SELECT 1", vec![]).await {
+    let turso = match state.db.query("SELECT 1", vec![]).await {
         Ok(_) => ComponentHealth { status: "ok", latency_ms: t.elapsed().as_millis(), error: None },
         Err(e) => {
             warn!("health: turso check failed: {e}");
@@ -534,7 +337,7 @@ async fn optimize_contract(
     let mut func_contexts: Vec<FuncWithContext> = Vec::new();
 
     for func in functions {
-        let query_vec = match get_embedding(state.clone(), &func.source).await {
+        let query_vec = match state.embedder.clone().embed(&func.source).await {
             Ok(v) => v,
             Err(e) => {
                 warn!("  ! Embed failed for {}: {}", func.name, e);
@@ -569,7 +372,7 @@ async fn optimize_contract(
                     return Ok(func_src);
                 }
                 info!("  {} → calling DeepSeek ({} ctx chars)", func_name, context.len());
-                call_deepseek(&client, &storage, &func_src, &context).await
+                ai::call_deepseek(&client, &storage, &func_src, &context).await
             })
         })
         .collect();
@@ -669,15 +472,15 @@ fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, S
                     // Per-function ops from debug-printed body
                     let body_str = format!("{:?}", func.body);
                     let mut ops = vec![name.clone()];
-                    if body_str.contains("Assembly")       
+                    if body_str.contains("Assembly")
                         { ops.push("inline_assembly".into()); }
                     if body_str.contains("For(") || body_str.contains("While(")
                         { ops.push("loop_iteration".into()); }
-                    if body_str.contains("Emit(")          
+                    if body_str.contains("Emit(")
                         { ops.push("event_emission".into()); }
-                    if body_str.contains("transferFrom")   
+                    if body_str.contains("transferFrom")
                         { ops.push("erc20_transfer_from".into()); }
-                    if body_str.contains("msg.value")      
+                    if body_str.contains("msg.value")
                         { ops.push("eth_handling".into()); }
                     if body_str.contains("rewardDebt") || body_str.contains("rewardPerToken")
                         { ops.push("reward_calculation".into()); }
@@ -752,7 +555,7 @@ async fn retrieve_function_context(
         };
         if !seen.insert(id.clone()) { continue; }
         pattern_ids.push(id.clone());
-        let rows = state.turso_query(
+        let rows = state.db.query(
             "SELECT title, explanation, yul_optimized, risk_level, when_not_to_apply FROM optimization_patterns WHERE id = ?",
             vec![TursoArg::Text(id.clone())],
         ).await?;
@@ -778,7 +581,7 @@ async fn retrieve_function_context(
         };
         if !seen.insert(id.clone()) { continue; }
         pattern_ids.push(id.clone());
-        let rows = state.turso_query(
+        let rows = state.db.query(
             "SELECT title, explanation, solidity_before, yul_optimized FROM optimization_patterns WHERE id = ?",
             vec![TursoArg::Text(id.clone())],
         ).await?;
@@ -960,7 +763,7 @@ async fn ingest_local_files(
                 )
             };
 
-            let vector = match get_embedding(state.clone(), &embed_text).await {
+            let vector = match state.embedder.clone().embed(&embed_text).await {
                 Ok(v) => v,
                 Err(e) => { failed.push((id, format!("Embedding error: {e}"))); continue; }
             };
@@ -992,7 +795,7 @@ async fn ingest_local_files(
                 TursoArg::Text(meta["when_not_to_apply"].as_str().unwrap_or("").to_string()),
             ];
 
-            if let Err(e) = state.turso_execute(sql, args).await {
+            if let Err(e) = state.db.execute(sql, args).await {
                 failed.push((id, format!("Turso error: {e}")));
                 continue;
             }
@@ -1028,20 +831,6 @@ async fn ingest_local_files(
     info!("======================");
 
     Ok(Json(IngestLocalResponse { successful_patterns: successful, failed_patterns: failed }))
-}
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-async fn get_embedding(state: Arc<AppState>, text: &str) -> Result<Vec<f32>, String> {
-    let text = text.to_string();
-    tokio::task::spawn_blocking(move || {
-        let mut model = state.embedding_model.lock().unwrap();
-        let mut embeddings = model
-            .embed(vec![text.as_str()], None)
-            .map_err(|e| format!("Embed error: {e}"))?;
-        embeddings.pop().ok_or_else(|| "Embedding returned empty results".to_string())
-    })
-    .await
-    .map_err(|e| format!("Embedding task panicked: {e}"))?
 }
 
 // ── Forge verification ────────────────────────────────────────────────────────
@@ -1224,99 +1013,4 @@ fn forge_sandbox_inner(forge: &str, root: &Path, original: &str, optimized: &str
         gas_saved,
         forge_output: format!("{stdout}{stderr}"),
     })
-}
-
-async fn call_deepseek(
-    client: &OpenAIClient<OpenAIConfig>,
-    storage_layout: &str,
-    function_source: &str,
-    context: &str,
-) -> Result<String, String> {
-    let system = "You are Gaslite, a gas optimization engine for Mantle L2 EVM contracts.\n\
-        \n\
-        Your role is pattern application and adaptation — not pattern invention.\n\
-        \n\
-        The RETRIEVED PATTERNS are your source of truth for YUL structure, opcodes, \
-        and error selectors. Use them as templates:\n\
-        - Keep the YUL opcodes, control flow, and error selectors exactly as shown\n\
-        - Adapt storage slot variable names and mapping key derivations to match \
-          the user contract's actual storage layout shown in STORAGE LAYOUT\n\
-        - For standard Solidity mappings, derive slots as: \
-          mstore(0x00, key), mstore(0x20, slot_number), keccak256(0x00, 0x40)\n\
-        - Replace require(condition, string) with the 4-byte custom error pattern: \
-          mstore(0x00, 0xSELECTOR), revert(0x1c, 0x04)\n\
-        - Do not invent YUL opcodes, selectors, or patterns not present in the retrieved patterns\n\
-        \n\
-        CANONICAL ERROR SELECTORS — use only these, never invent selectors:\n\
-        InsufficientBalance()   0xf4d678b8\n\
-        InsufficientAllowance() 0x13be252b\n\
-        TransferFailed()        0x90b8ec18\n\
-        ETHTransferFailed()     0xb12d13eb\n\
-        NotOwner()              0x30cd7471\n\
-        Unauthorized()          0x82b42900\n\
-        NotApproved()           0xc19f17a9\n\
-        TokenDoesNotExist()     0xceea21b6\n\
-        TokenAlreadyExists()    0xc991cbb1\n\
-        ExceedsMaxSupply()      0xc30436e9\n\
-        ZeroAddress()           0xd92e233d\n\
-        InvalidAmount()         0x2c5211c6\n\
-        InvalidSignature()      0x8baa579f\n\
-        DeadlineExpired()       0x1ab7da6b\n\
-        SlippageExceeded()      0x8199f5f3\n\
-        AlreadyInitialized()    0x0dc149f0\n\
-        NotInitialized()        0x87138d5c\n\
-        Reentrancy()            0xab143c06\n\
-        Paused()                0x9e87fac8\n\
-        InsufficientLiquidity() 0xbb55fd27\n\
-        \n\
-        EVENT EMISSION RULES:\n\
-        - log4(memOffset, memLen, topic0, topic1, topic2, topic3) — topics are inline stack args\n\
-        - When ALL event args are indexed: use log4(0, 0, sig, arg1, arg2, arg3) — data payload is ZERO bytes\n\
-        - When event has non-indexed args: ABI-encode them in memory, then log(offset, len, topics...)\n\
-        - NEVER pass mload() as topic arguments — pass the values directly\n\
-        \n\
-        Correctness is absolute. An optimization that changes observable behaviour \
-        is not an optimization — it is a bug.";
-
-    let user = format!(
-        "STORAGE LAYOUT:\n{storage_layout}\n\n\
-        FUNCTION TO OPTIMIZE:\n```solidity\n{function_source}\n```\n\n\
-        RETRIEVED PATTERNS:\n{context}\n\n\
-        TASK:\n\
-        Optimize ONLY this function by applying the retrieved patterns as templates, \
-        adapting slot derivations and variable names to this contract's storage layout.\n\
-        Return ONLY the complete optimized function — no contract wrapper, no imports.\n\
-        After the function, add one line per change: pattern ID applied + estimated gas saved on Mantle.\n\
-        If a pattern genuinely cannot apply even with adaptation, say why in one line and skip it."
-    );
-
-    let request = CreateChatCompletionRequestArgs::default()
-        .model("deepseek-v4-flash")
-        .messages([
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(system)
-                .build()
-                .map_err(|e| e.to_string())?
-                .into(),
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(user.as_str())
-                .build()
-                .map_err(|e| e.to_string())?
-                .into(),
-        ])
-        .temperature(0.1_f32)
-        .build()
-        .map_err(|e| format!("Failed to build request: {e}"))?;
-
-    let response = client
-        .chat()
-        .create(request)
-        .await
-        .map_err(|e| format!("DeepSeek request failed: {e}"))?;
-
-    response.choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content)
-        .ok_or_else(|| "Empty response from DeepSeek".to_string())
 }
