@@ -17,12 +17,12 @@ pub struct VerifyRequest {
 
 #[derive(Serialize)]
 pub struct VerifyResponse {
-    compiles: bool,
-    errors: Vec<String>,
-    gas_original: Option<u64>,
-    gas_optimized: Option<u64>,
-    gas_saved: Option<i64>,
-    forge_output: String,
+    pub(crate) compiles: bool,
+    pub(crate) errors: Vec<String>,
+    pub(crate) gas_original: Option<u64>,
+    pub(crate) gas_optimized: Option<u64>,
+    pub(crate) gas_saved: Option<i64>,
+    pub(crate) forge_output: String,
 }
 
 // ── handler ───────────────────────────────────────────────────────────────────
@@ -38,6 +38,15 @@ pub async fn verify_contract(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+/// Whether a usable `forge` binary is present — gates the closed-loop refinement.
+pub(crate) fn forge_available() -> bool {
+    std::process::Command::new(forge_binary())
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn forge_binary() -> String {
     if let Ok(home) = std::env::var("HOME") {
         let p = format!("{home}/.foundry/bin/forge");
@@ -115,7 +124,7 @@ fn parse_test_gas(output: &str, fn_suffix: &str) -> Option<u64> {
     None
 }
 
-fn run_forge_sandbox(original: &str, optimized: &str) -> Result<VerifyResponse, String> {
+pub(crate) fn run_forge_sandbox(original: &str, optimized: &str) -> Result<VerifyResponse, String> {
     let forge = forge_binary();
     let root = std::env::temp_dir().join(format!("gaslite_{}", Uuid::new_v4()));
     let res = forge_sandbox_inner(&forge, &root, original, optimized);

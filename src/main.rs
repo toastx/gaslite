@@ -2,11 +2,17 @@
 
 mod ai;
 mod db;
+mod embedding;
 mod forge;
+mod retrieval;
+mod rig_agent;
+mod tools;
 mod utils;
 
 use ai::Embedder;
 use db::{Turso, TursoArg};
+use embedding::FastembedAdapter;
+use retrieval::GasliteIndex;
 
 use tracing::{info, warn, error};
 use axum::{
@@ -15,31 +21,30 @@ use axum::{
     Json, Router,
 };
 use qdrant_client::{Payload, qdrant::{
-    Condition, CreateCollectionBuilder, Distance, Filter, PointStruct, SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder
+    CreateCollectionBuilder, Distance, PointStruct, UpsertPointsBuilder, VectorParamsBuilder
 }};
 use qdrant_client::qdrant::{CreateFieldIndexCollectionBuilder, FieldType};
 use qdrant_client::Qdrant;
+use rig_core::client::ProviderClient;
+use rig_core::providers::deepseek;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 use solang_parser::pt::{ContractPart, Loc, SourceUnitPart};
-use async_openai::{
-    Client as OpenAIClient,
-    config::OpenAIConfig,
-};
 
 // ── constants ─────────────────────────────────────────────────────────────────
-const COLLECTION: &str = "gaslite_patterns";
+pub const COLLECTION: &str = "gaslite_patterns";
 const VECTOR_DIM: u64 = 384;
 
 // ── app state ─────────────────────────────────────────────────────────────────
 struct AppState {
-    db: Turso,
-    qdrant: Qdrant,
-    deepseek: OpenAIClient<OpenAIConfig>,
+    db: Arc<Turso>,
+    qdrant: Arc<Qdrant>,
+    deepseek: deepseek::Client,
     embedder: Arc<Embedder>,
+    forge_available: bool,
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
@@ -66,15 +71,6 @@ struct IngestLocalResponse {
     failed_patterns: Vec<(String, String)>,
 }
 
-// ── per-function analysis ─────────────────────────────────────────────────────
-struct FunctionInfo {
-    name: String,
-    source: String,  // exact source text extracted via byte offsets
-    start: usize,    // byte offset in original contract source
-    end: usize,
-    ops: Vec<String>,
-}
-
 // ── entry point ───────────────────────────────────────────────────────────────
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,14 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let deepseek_api_key = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY required");
-    let deepseek_base = std::env::var("DEEPSEEK_BASE_URL")
-        .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
-    let deepseek = OpenAIClient::with_config(
-        OpenAIConfig::new()
-            .with_api_base(deepseek_base)
-            .with_api_key(&deepseek_api_key),
-    );
+    let deepseek = deepseek::Client::from_env()
+        .expect("DEEPSEEK_API_KEY required to build the rig DeepSeek client");
     let qdrant_api_key = std::env::var("QDRANT_API_KEY").expect("QDRANT_API_KEY required");
     let qdrant_url = std::env::var("QDRANT_CLUSTER_URL").expect("QDRANT_CLUSTER_URL required");
     let turso_url = std::env::var("TURSO_DATABASE_URL").expect("TURSO_DATABASE_URL required");
@@ -126,11 +116,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("Failed to create Qdrant collection");
     }
 
+    let forge_available = forge::forge_available();
+    if forge_available {
+        info!("forge detected — closed-loop refinement enabled");
+    } else {
+        warn!("forge not found — closed-loop refinement disabled (one-shot mode)");
+    }
+
     let state = Arc::new(AppState {
-        db: Turso::new(http, turso_url, turso_token),
-        qdrant,
+        db: Arc::new(Turso::new(http, turso_url, turso_token)),
+        qdrant: Arc::new(qdrant),
         deepseek,
         embedder,
+        forge_available,
     });
 
     // run migration via HTTP
@@ -298,125 +296,129 @@ async fn optimize_contract(
 ) -> Result<Json<OptimizeResponse>, (axum::http::StatusCode, String)> {
     let t0 = std::time::Instant::now();
 
-    // 1. Parse contract into individual functions
-    let (category, functions, storage_layout) = analyze_contract(&payload.contract_source);
+    // 1. Parse the contract: detect category, count optimizable functions, storage layout.
+    let (category, function_count, storage_layout) = analyze_contract(&payload.contract_source);
     let category_str = category.unwrap_or("general");
 
     info!("=== OPTIMIZE REQUEST ===");
     info!("  contract : {} bytes", payload.contract_source.len());
     info!("  detected : {}", category_str);
-    info!("  functions: {}", functions.len());
+    info!("  functions: {}", function_count);
+    info!("  forge    : {}", if state.forge_available { "closed-loop" } else { "one-shot" });
     info!("========================");
 
-    if functions.is_empty() {
+    if function_count == 0 {
         return Err((axum::http::StatusCode::BAD_REQUEST,
             "No optimizable functions found — ensure the contract parses correctly".to_string()));
     }
 
-    // 2. Sequential: embed + retrieve per function (mutex on embedding model serialises embed calls)
-    struct FuncWithContext {
-        info: FunctionInfo,
-        context: String,
-        pattern_ids: Vec<String>,
-    }
+    // 2. Build the rig embedding adapter + retrieval index (category baked in).
+    let adapter = FastembedAdapter::new(state.embedder.clone());
 
-    let mut func_contexts: Vec<FuncWithContext> = Vec::new();
-
-    for func in functions {
-        let query_vec = match state.embedder.clone().embed(&func.source).await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("  ! Embed failed for {}: {}", func.name, e);
-                func_contexts.push(FuncWithContext { info: func, context: String::new(), pattern_ids: vec![] });
-                continue;
+    // Collect the pattern ids for the response. Uses a separate index instance,
+    // since the agent's index is moved into `dynamic_context`.
+    let suggested_patterns = {
+        use rig_core::vector_store::request::VectorSearchRequest;
+        use rig_core::vector_store::VectorStoreIndex;
+        let id_index =
+            GasliteIndex::new(state.qdrant.clone(), state.db.clone(), adapter.clone(), category);
+        let req = VectorSearchRequest::builder()
+            .query(payload.contract_source.clone())
+            .samples(6)
+            .build();
+        match id_index.top_n_ids(req).await {
+            Ok(hits) => {
+                let mut ids: Vec<String> = hits.into_iter().map(|(_, id)| id).collect();
+                ids.sort();
+                ids.dedup();
+                ids
             }
-        };
-
-        let (context, pattern_ids) = retrieve_function_context(&state, &query_vec, category)
-            .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-        info!("  {} → {} patterns retrieved", func.name, pattern_ids.len());
-        func_contexts.push(FuncWithContext { info: func, context, pattern_ids });
-    }
-
-    // 3. Parallel: one tokio task per function → DeepSeek call
-    info!("=== SPAWNING {} DEEPSEEK TASKS ===", func_contexts.len());
-
-    let handles: Vec<tokio::task::JoinHandle<Result<String, String>>> = func_contexts
-        .iter()
-        .map(|fc| {
-            let client   = state.deepseek.clone();
-            let storage  = storage_layout.clone();
-            let func_src = fc.info.source.clone();
-            let func_name = fc.info.name.clone();
-            let context  = fc.context.clone();
-
-            tokio::spawn(async move {
-                if context.is_empty() {
-                    info!("  {} → no patterns, kept unchanged", func_name);
-                    return Ok(func_src);
-                }
-                info!("  {} → calling DeepSeek ({} ctx chars)", func_name, context.len());
-                ai::call_deepseek(&client, &storage, &func_src, &context).await
-            })
-        })
-        .collect();
-
-    // Await all in order (tasks already run in parallel since all spawned before any await)
-    let mut results: Vec<Result<Result<String, String>, tokio::task::JoinError>> = Vec::new();
-    for h in handles { results.push(h.await); }
-
-    // 4. Splice optimized functions back — reverse order preserves earlier byte offsets
-    let mut optimized_source = payload.contract_source.clone();
-    let mut optimized_count = 0usize;
-    let mut all_pattern_ids: Vec<String> = Vec::new();
-
-    for (fc, task_result) in func_contexts.iter().zip(results.iter()).rev() {
-        all_pattern_ids.extend(fc.pattern_ids.iter().cloned());
-
-        let optimized_func = match task_result {
-            Ok(Ok(s)) => utils::strip_code_fences(s),
-            Ok(Err(e)) => { error!("  ! DeepSeek failed for {}: {}", fc.info.name, e); continue; }
-            Err(e)     => { error!("  ! Task panicked for {}: {}", fc.info.name, e); continue; }
-        };
-
-        if optimized_func == fc.info.source { continue; } // unchanged, skip splice
-
-        if fc.info.end <= optimized_source.len() {
-            optimized_source.replace_range(fc.info.start..fc.info.end, &optimized_func);
-            optimized_count += 1;
+            Err(e) => {
+                warn!("  ! pattern id retrieval failed: {e}");
+                vec![]
+            }
         }
-    }
+    };
+    info!("  patterns retrieved: {}", suggested_patterns.len());
 
-    all_pattern_ids.sort();
-    all_pattern_ids.dedup();
+    // 3. Run the rig refinement agent over the whole contract.
+    let agent_index =
+        GasliteIndex::new(state.qdrant.clone(), state.db.clone(), adapter, category);
+
+    info!("=== RUNNING REFINEMENT AGENT ===");
+    let raw = rig_agent::optimize_contract(
+        &state.deepseek,
+        agent_index,
+        &storage_layout,
+        &payload.contract_source,
+        state.forge_available,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let mut optimized_code = utils::strip_code_fences(&raw);
+
+    // 4. Final authoritative forge check — accept only if it still compiles.
+    let analysis: String;
+    if state.forge_available {
+        let orig = payload.contract_source.clone();
+        let opt = optimized_code.clone();
+        match tokio::task::spawn_blocking(move || forge::run_forge_sandbox(&orig, &opt)).await {
+            Ok(Ok(vr)) if vr.compiles => {
+                info!(
+                    "  forge verified: original={:?} optimized={:?} saved={:?}",
+                    vr.gas_original, vr.gas_optimized, vr.gas_saved
+                );
+                analysis = format!(
+                    "Verified on Mantle fork. Gas original={:?}, optimized={:?}, saved={:?}.",
+                    vr.gas_original, vr.gas_optimized, vr.gas_saved
+                );
+            }
+            Ok(Ok(vr)) => {
+                warn!("  final forge check: optimized did not compile — keeping original");
+                optimized_code = payload.contract_source.clone();
+                analysis = format!(
+                    "Optimization rejected — final compile failed. Errors: {}",
+                    vr.errors.join("; ")
+                );
+            }
+            Ok(Err(e)) => {
+                warn!("  final forge check errored: {e} — returning agent output unverified");
+                analysis = format!("Optimized (unverified — forge error: {e}).");
+            }
+            Err(e) => {
+                warn!("  final forge check task panicked: {e}");
+                analysis = "Optimized (unverified — forge task panicked).".to_string();
+            }
+        }
+    } else {
+        analysis = "Optimized (one-shot — forge unavailable, not verified).".to_string();
+    }
 
     info!("=== OPTIMIZE COMPLETE ===");
-    info!("  functions optimized: {}/{}", optimized_count, func_contexts.len());
-    info!("  patterns used      : {}", all_pattern_ids.len());
-    info!("  elapsed            : {:.2?}", t0.elapsed());
+    info!("  patterns : {}", suggested_patterns.len());
+    info!("  elapsed  : {:.2?}", t0.elapsed());
     info!("=========================");
 
     Ok(Json(OptimizeResponse {
-        analysis: format!(
-            "Optimized {}/{} functions using {} patterns.",
-            optimized_count, func_contexts.len(), all_pattern_ids.len()
-        ),
-        suggested_patterns: all_pattern_ids,
-        optimized_code: optimized_source,
+        analysis,
+        suggested_patterns,
+        optimized_code,
     }))
 }
 
 
-// ── Contract analysis: category + per-function extraction ────────────────────
-fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, String) {
+// ── Contract analysis: category + optimizable-function count + storage layout ──
+// The agent works on the whole contract, so we only need the detected category,
+// how many named functions with a body exist (to reject non-optimizable input),
+// and the storage variable declarations to feed the prompt.
+fn analyze_contract(source: &str) -> (Option<&'static str>, usize, String) {
     let Ok((su, _)) = solang_parser::parse(source, 0) else {
-        return (detect_category_fallback(source), vec![], String::new());
+        return (detect_category_fallback(source), 0, String::new());
     };
 
     let mut category: Option<&'static str> = None;
-    let mut functions: Vec<FunctionInfo> = Vec::new();
+    let mut function_count: usize = 0;
     let mut storage_vars: Vec<String> = Vec::new();
 
     for part in su.0 {
@@ -447,40 +449,18 @@ fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, S
                     }
                 }
                 ContractPart::FunctionDefinition(func) => {
-                    // Skip unnamed (constructor/fallback/receive) and abstract (no body)
-                    let Some(name_ident) = &func.name else { continue };
-                    let Some(_) = &func.body else { continue };
-                    let Loc::File(_, start, end) = func.loc else { continue };
-                    let Some(func_text) = source.get(start..end) else { continue };
-
-                    let name = name_ident.name.clone();
-
-                    // Per-function ops from debug-printed body
-                    let body_str = format!("{:?}", func.body);
-                    let mut ops = vec![name.clone()];
-                    if body_str.contains("Assembly")
-                        { ops.push("inline_assembly".into()); }
-                    if body_str.contains("For(") || body_str.contains("While(")
-                        { ops.push("loop_iteration".into()); }
-                    if body_str.contains("Emit(")
-                        { ops.push("event_emission".into()); }
-                    if body_str.contains("transferFrom")
-                        { ops.push("erc20_transfer_from".into()); }
-                    if body_str.contains("msg.value")
-                        { ops.push("eth_handling".into()); }
-                    if body_str.contains("rewardDebt") || body_str.contains("rewardPerToken")
-                        { ops.push("reward_calculation".into()); }
-                    ops.sort();
-                    ops.dedup();
-
-                    functions.push(FunctionInfo { name, source: func_text.to_string(), start, end, ops });
+                    // Count only named functions with a body (skip constructor/
+                    // fallback/receive and abstract declarations).
+                    if func.name.is_some() && func.body.is_some() {
+                        function_count += 1;
+                    }
                 }
                 _ => {}
             }
         }
     }
 
-    (category, functions, storage_vars.join("\n"))
+    (category, function_count, storage_vars.join("\n"))
 }
 
 fn detect_category_fallback(source: &str) -> Option<&'static str> {
@@ -490,105 +470,6 @@ fn detect_category_fallback(source: &str) -> Option<&'static str> {
     if s.contains("is erc2981") || s.contains(": erc2981") { return Some("erc2981"); }
     if s.contains("is erc20") || s.contains(": erc20")    { return Some("erc20"); }
     None
-}
-
-
-
-// Returns (context_string, pattern_ids) for a single function's query vector
-async fn retrieve_function_context(
-    state: &Arc<AppState>,
-    query_vec: &[f32],
-    category: Option<&'static str>,
-) -> Result<(String, Vec<String>), String> {
-    let mut pattern_contexts: Vec<String> = Vec::new();
-    let mut anti_contexts: Vec<String> = Vec::new();
-    let mut pattern_ids: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    let token_cats = ["erc20", "erc721", "erc1155", "erc2981", "accounts"];
-    let is_token = category.map(|c| token_cats.contains(&c)).unwrap_or(false);
-
-    let pattern_hits = if is_token {
-        let cat = category.unwrap();
-        let cat_r = state.qdrant.search_points(
-            SearchPointsBuilder::new(COLLECTION, query_vec.to_vec(), 2)
-                .with_payload(true)
-                .filter(Filter::must([Condition::matches("category", cat.to_string())]))
-        ).await.map_err(|e| e.to_string())?;
-
-        let gen_r = state.qdrant.search_points(
-            SearchPointsBuilder::new(COLLECTION, query_vec.to_vec(), 1)
-                .with_payload(true)
-                .filter(Filter::must_not(
-                    token_cats.iter().map(|c| Condition::matches("category", c.to_string())).collect::<Vec<_>>()
-                ))
-        ).await.map_err(|e| e.to_string())?;
-
-        let mut combined = cat_r.result;
-        combined.extend(gen_r.result);
-        combined
-    } else {
-        state.qdrant.search_points(
-            SearchPointsBuilder::new(COLLECTION, query_vec.to_vec(), 3)
-                .with_payload(true)
-        ).await.map_err(|e| e.to_string())?.result
-    };
-
-    for hit in pattern_hits {
-        let id = match hit.payload.get("pattern_id") {
-            Some(v) => v.to_string().trim().replace('"', ""),
-            None => continue,
-        };
-        if !seen.insert(id.clone()) { continue; }
-        pattern_ids.push(id.clone());
-        let rows = state.db.query(
-            "SELECT title, explanation, yul_optimized, risk_level, when_not_to_apply FROM optimization_patterns WHERE id = ?",
-            vec![TursoArg::Text(id.clone())],
-        ).await?;
-        if let Some(row) = rows.first() {
-            let get = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            pattern_contexts.push(format!(
-                "PATTERN ID: {}\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
-                id, get("title"), get("explanation"), get("yul_optimized"), get("risk_level"), get("when_not_to_apply"),
-            ));
-        }
-    }
-
-    let anti_hits = state.qdrant.search_points(
-        SearchPointsBuilder::new(COLLECTION, query_vec.to_vec(), 2)
-            .with_payload(true)
-            .filter(Filter::must([Condition::matches("type", "antipattern".to_string())]))
-    ).await.map_err(|e| e.to_string())?.result;
-
-    for hit in anti_hits {
-        let id = match hit.payload.get("pattern_id") {
-            Some(v) => v.to_string().trim().replace('"', ""),
-            None => continue,
-        };
-        if !seen.insert(id.clone()) { continue; }
-        pattern_ids.push(id.clone());
-        let rows = state.db.query(
-            "SELECT title, explanation, solidity_before, yul_optimized FROM optimization_patterns WHERE id = ?",
-            vec![TursoArg::Text(id.clone())],
-        ).await?;
-        if let Some(row) = rows.first() {
-            let get = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            anti_contexts.push(format!(
-                "ANTIPATTERN ID: {}\nTitle: {}\nExplanation: {}\nWrong:\n{}\nCorrect:\n{}",
-                id, get("title"), get("explanation"), get("solidity_before"), get("yul_optimized"),
-            ));
-        }
-    }
-
-    let mut parts = Vec::new();
-    if !pattern_contexts.is_empty() {
-        parts.push(format!("PATTERNS TO APPLY:\n\n{}", pattern_contexts.join("\n\n---\n\n")));
-    }
-    if !anti_contexts.is_empty() {
-        parts.push(format!("ANTIPATTERNS TO AVOID:\n\n{}", anti_contexts.join("\n\n---\n\n")));
-    }
-
-    Ok((parts.join("\n\n===\n\n"), pattern_ids))
 }
 
 async fn create_qdrant_indexes(state: &AppState) -> Result<(), String> {
