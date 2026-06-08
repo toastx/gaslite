@@ -8,7 +8,7 @@ use rig_core::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::forge::run_forge_sandbox;
+use crate::forge::run_forge_sandbox_async;
 
 #[derive(Deserialize)]
 pub struct ForgeArgs {
@@ -68,12 +68,9 @@ impl Tool for ForgeTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let res = tokio::task::spawn_blocking(move || {
-            run_forge_sandbox(&args.original_code, &args.optimized_code)
-        })
-        .await
-        .map_err(|e| ForgeError(format!("forge task panicked: {e}")))?
-        .map_err(ForgeError)?;
+        let res = run_forge_sandbox_async(args.original_code, args.optimized_code)
+            .await
+            .map_err(ForgeError)?;
 
         let gas_measured = res.compiles && res.gas_optimized.is_some();
         let forge_excerpt: String = res.forge_output.chars().take(2000).collect();

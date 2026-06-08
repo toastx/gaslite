@@ -1,7 +1,11 @@
 //! Custom rig `VectorStoreIndex` reproducing Gaslite's composed retrieval:
 //! category-filtered + general + antipattern Qdrant search, then full pattern
-//! text fetched from Turso. Built per request with the AST-detected category
-//! baked in, then handed to the agent via `dynamic_context`.
+//! text fetched from Turso. Built per request with the AST-detected category and
+//! the contract source baked in.
+//!
+//! Retrieval is pinned to the contract (NOT rig's per-turn query) and memoised in
+//! a shared `OnceCell`, so the composed search runs **once** per request even
+//! though `dynamic_context` re-fetches on every agent turn.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -13,6 +17,7 @@ use rig_core::vector_store::request::{Filter, VectorSearchRequest};
 use rig_core::vector_store::{VectorStoreError, VectorStoreIndex};
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::OnceCell;
 
 use crate::db::{Turso, TursoArg};
 use crate::embedding::FastembedAdapter;
@@ -20,12 +25,20 @@ use crate::COLLECTION;
 
 const TOKEN_CATS: [&str; 5] = ["erc20", "erc721", "erc1155", "erc2981", "accounts"];
 
+/// One retrieved entry: `(score, pattern_id, formatted_document_text)`.
+type Hit = (f64, String, String);
+
 #[derive(Clone)]
 pub struct GasliteIndex {
     qdrant: Arc<Qdrant>,
     db: Arc<Turso>,
     embedder: FastembedAdapter,
     category: Option<&'static str>,
+    /// The contract source — the fixed retrieval query for this request.
+    query: String,
+    /// Memoised composed-search result, shared across clones (rig clones the
+    /// index per turn) so the search runs at most once.
+    cache: Arc<OnceCell<Vec<Hit>>>,
 }
 
 impl GasliteIndex {
@@ -34,17 +47,37 @@ impl GasliteIndex {
         db: Arc<Turso>,
         embedder: FastembedAdapter,
         category: Option<&'static str>,
+        query: String,
     ) -> Self {
-        Self { qdrant, db, embedder, category }
+        Self {
+            qdrant,
+            db,
+            embedder,
+            category,
+            query,
+            cache: Arc::new(OnceCell::new()),
+        }
     }
 
-    /// Embed the query and run the composed search, returning
-    /// `(score, pattern_id, formatted_document_text)` per retrieved entry.
-    async fn retrieve(&self, query: &str) -> Result<Vec<(f64, String, String)>, VectorStoreError> {
-        // 1. Embed the query through the rig adapter, cast f64 -> f32 for Qdrant.
+    /// Retrieve (memoised). The composed search runs once; later calls clone the
+    /// cached result.
+    async fn retrieve(&self) -> Result<Vec<Hit>, VectorStoreError> {
+        let hits = self.cache.get_or_try_init(|| self.compute()).await?;
+        Ok(hits.clone())
+    }
+
+    /// Pattern ids for the optimize response. Shares the same cache as the agent.
+    pub async fn pattern_ids(&self) -> Result<Vec<String>, VectorStoreError> {
+        Ok(self.retrieve().await?.into_iter().map(|(_, id, _)| id).collect())
+    }
+
+    /// The actual composed search: embed the contract, run the
+    /// category/general/antipattern Qdrant queries, dedup, fetch text from Turso.
+    async fn compute(&self) -> Result<Vec<Hit>, VectorStoreError> {
+        // 1. Embed the contract through the rig adapter, cast f64 -> f32 for Qdrant.
         let emb = self
             .embedder
-            .embed_text(query)
+            .embed_text(&self.query)
             .await
             .map_err(VectorStoreError::EmbeddingError)?;
         let qvec: Vec<f32> = emb.vec.iter().map(|f| *f as f32).collect();
@@ -96,7 +129,7 @@ impl GasliteIndex {
                 .result
         };
 
-        let mut out: Vec<(f64, String, String)> = Vec::new();
+        let mut out: Vec<Hit> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
         for hit in pattern_hits {
@@ -173,12 +206,16 @@ impl GasliteIndex {
 impl VectorStoreIndex for GasliteIndex {
     type Filter = Filter<serde_json::Value>;
 
+    // Both methods ignore the request's query/sample count: retrieval is pinned
+    // to the contract (`self.query`) and memoised, so every agent turn reuses the
+    // same composed result instead of re-embedding and re-searching.
     async fn top_n<T: for<'a> Deserialize<'a> + Send>(
         &self,
-        req: VectorSearchRequest<Self::Filter>,
+        _req: VectorSearchRequest<Self::Filter>,
     ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
-        let hits = self.retrieve(req.query()).await?;
-        hits.into_iter()
+        self.retrieve()
+            .await?
+            .into_iter()
             .map(|(score, id, text)| {
                 let doc = json!({ "pattern_id": id.clone(), "context": text });
                 let val = serde_json::from_value::<T>(doc)?;
@@ -189,9 +226,13 @@ impl VectorStoreIndex for GasliteIndex {
 
     async fn top_n_ids(
         &self,
-        req: VectorSearchRequest<Self::Filter>,
+        _req: VectorSearchRequest<Self::Filter>,
     ) -> Result<Vec<(f64, String)>, VectorStoreError> {
-        let hits = self.retrieve(req.query()).await?;
-        Ok(hits.into_iter().map(|(score, id, _)| (score, id)).collect())
+        Ok(self
+            .retrieve()
+            .await?
+            .into_iter()
+            .map(|(score, id, _)| (score, id))
+            .collect())
     }
 }

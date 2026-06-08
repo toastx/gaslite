@@ -4,8 +4,13 @@
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Read;
 use std::path::Path;
-use tracing::info;
+use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
@@ -30,14 +35,98 @@ pub async fn verify_contract(
     Json(payload): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, (axum::http::StatusCode, String)> {
     info!("POST /api/verify — {} + {} bytes", payload.original_code.len(), payload.optimized_code.len());
-    tokio::task::spawn_blocking(move || run_forge_sandbox(&payload.original_code, &payload.optimized_code))
+    run_forge_sandbox_async(payload.original_code, payload.optimized_code)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map(Json)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
+// ── concurrency-bounded async entrypoint ──────────────────────────────────────
+/// Global cap on concurrent forge sandboxes so N in-flight requests (each of
+/// which may run forge several times in the agent loop plus a final check) don't
+/// fork unbounded subprocesses. Override with `FORGE_MAX_CONCURRENCY`.
+fn forge_semaphore() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| {
+        let permits = std::env::var("FORGE_MAX_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2)
+            .max(1);
+        Semaphore::new(permits)
+    })
+}
+
+/// Run the (blocking) forge sandbox on a worker thread, bounded by the global
+/// concurrency limit. The single entrypoint for every forge invocation —
+/// `/api/verify`, `ForgeTool`, and the optimize handler's final check.
+pub(crate) async fn run_forge_sandbox_async(
+    original: String,
+    optimized: String,
+) -> Result<VerifyResponse, String> {
+    let _permit = forge_semaphore()
+        .acquire()
+        .await
+        .map_err(|e| format!("forge semaphore closed: {e}"))?;
+    tokio::task::spawn_blocking(move || run_forge_sandbox(&original, &optimized))
+        .await
+        .map_err(|e| format!("forge task panicked: {e}"))?
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
+/// Run a command with a wall-clock timeout, killing it on expiry. Stdout/stderr
+/// are drained on threads so a chatty child can't deadlock on a full pipe buffer.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<Output> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+
+    let mut out_pipe = child.stdout.take().expect("piped stdout");
+    let mut err_pipe = child.stderr.take().expect("piped stderr");
+    let out_h = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = out_pipe.read_to_end(&mut b);
+        b
+    });
+    let err_h = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = err_pipe.read_to_end(&mut b);
+        b
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            warn!("  forge: killing subprocess after {}s timeout", timeout.as_secs());
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = out_h.join();
+            let _ = err_h.join();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("forge subprocess timed out after {}s", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    Ok(Output {
+        status,
+        stdout: out_h.join().unwrap_or_default(),
+        stderr: err_h.join().unwrap_or_default(),
+    })
+}
+
+/// Timeout (seconds) for a forge step. `build` is local; `test` hits a Mantle fork.
+fn forge_timeout(var: &str, default_secs: u64) -> Duration {
+    let secs = std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default_secs);
+    Duration::from_secs(secs)
+}
+
 /// Whether a usable `forge` binary is present — gates the closed-loop refinement.
 pub(crate) fn forge_available() -> bool {
     std::process::Command::new(forge_binary())
@@ -163,10 +252,10 @@ fn forge_sandbox_inner(forge: &str, root: &Path, original: &str, optimized: &str
 
     // ── build ─────────────────────────────────────────────────────────────────
     info!("  forge build: {}", root.display());
-    let build = std::process::Command::new(forge)
-        .args(["build", "--root", root.to_str().unwrap()])
-        .output()
-        .map_err(|e| format!("forge not found — is Foundry installed? ({e})"))?;
+    let mut build_cmd = Command::new(forge);
+    build_cmd.args(["build", "--root", root.to_str().unwrap()]);
+    let build = run_with_timeout(build_cmd, forge_timeout("FORGE_BUILD_TIMEOUT_SECS", 90))
+        .map_err(|e| format!("forge build failed (not installed or timed out): {e}"))?;
 
     if !build.status.success() {
         let stderr = String::from_utf8_lossy(&build.stderr).to_string();
@@ -188,11 +277,11 @@ fn forge_sandbox_inner(forge: &str, root: &Path, original: &str, optimized: &str
         .map_err(|e| e.to_string())?;
 
     info!("  forge test: fork={}", mantle_rpc);
-    let test_run = std::process::Command::new(forge)
-        .args(["test", "--root", root.to_str().unwrap(),
-               "--fork-url", &mantle_rpc, "-vv"])
-        .output()
-        .map_err(|e| format!("forge test failed: {e}"))?;
+    let mut test_cmd = Command::new(forge);
+    test_cmd.args(["test", "--root", root.to_str().unwrap(),
+                   "--fork-url", &mantle_rpc, "-vv"]);
+    let test_run = run_with_timeout(test_cmd, forge_timeout("FORGE_TEST_TIMEOUT_SECS", 240))
+        .map_err(|e| format!("forge test failed or timed out: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&test_run.stdout).to_string();
     let stderr = String::from_utf8_lossy(&test_run.stderr).to_string();

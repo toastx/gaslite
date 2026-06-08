@@ -317,43 +317,37 @@ async fn optimize_contract(
             "No optimizable functions found — ensure the contract parses correctly".to_string()));
     }
 
-    // 2. Build the rig embedding adapter + retrieval index (category baked in).
+    // 2. Build the retrieval index (category + contract baked in). Retrieval is
+    //    memoised inside the index, so the composed search runs once and is reused
+    //    by the agent's dynamic_context on every turn.
     let adapter = FastembedAdapter::new(state.embedder.clone());
+    let index = GasliteIndex::new(
+        state.qdrant.clone(),
+        state.db.clone(),
+        adapter,
+        category,
+        payload.contract_source.clone(),
+    );
 
-    // Collect the pattern ids for the response. Uses a separate index instance,
-    // since the agent's index is moved into `dynamic_context`.
-    let suggested_patterns = {
-        use rig_core::vector_store::request::VectorSearchRequest;
-        use rig_core::vector_store::VectorStoreIndex;
-        let id_index =
-            GasliteIndex::new(state.qdrant.clone(), state.db.clone(), adapter.clone(), category);
-        let req = VectorSearchRequest::builder()
-            .query(payload.contract_source.clone())
-            .samples(6)
-            .build();
-        match id_index.top_n_ids(req).await {
-            Ok(hits) => {
-                let mut ids: Vec<String> = hits.into_iter().map(|(_, id)| id).collect();
-                ids.sort();
-                ids.dedup();
-                ids
-            }
-            Err(e) => {
-                warn!("  ! pattern id retrieval failed: {e}");
-                vec![]
-            }
+    // Pattern ids for the response — this populates the shared cache.
+    let suggested_patterns = match index.pattern_ids().await {
+        Ok(mut ids) => {
+            ids.sort();
+            ids.dedup();
+            ids
+        }
+        Err(e) => {
+            warn!("  ! pattern retrieval failed: {e}");
+            vec![]
         }
     };
     info!("  patterns retrieved: {}", suggested_patterns.len());
 
-    // 3. Run the rig refinement agent over the whole contract.
-    let agent_index =
-        GasliteIndex::new(state.qdrant.clone(), state.db.clone(), adapter, category);
-
+    // 3. Run the rig refinement agent over the whole contract (reuses the cache).
     info!("=== RUNNING REFINEMENT AGENT ===");
     let raw = rig_agent::optimize_contract(
         &state.deepseek,
-        agent_index,
+        index,
         &storage_layout,
         &payload.contract_source,
         state.forge_available,
@@ -369,11 +363,9 @@ async fn optimize_contract(
     //    behavioural equivalence — the sandbox does not test runtime semantics.
     let analysis: String;
     if state.forge_available {
-        let orig = payload.contract_source.clone();
-        let opt = optimized_code.clone();
-        match tokio::task::spawn_blocking(move || forge::run_forge_sandbox(&orig, &opt)).await {
+        match forge::run_forge_sandbox_async(payload.contract_source.clone(), optimized_code.clone()).await {
             // Accept only on a proven gas improvement.
-            Ok(Ok(vr)) if vr.compiles && vr.gas_saved.unwrap_or(0) > 0 => {
+            Ok(vr) if vr.compiles && vr.gas_saved.unwrap_or(0) > 0 => {
                 let saved = vr.gas_saved.unwrap_or(0);
                 info!(
                     "  forge accepted: original={} optimized={} saved={}",
@@ -386,7 +378,7 @@ async fn optimize_contract(
                 );
             }
             // Compiles but no proven improvement (regression, zero, or unmeasured) → keep original.
-            Ok(Ok(vr)) if vr.compiles => {
+            Ok(vr) if vr.compiles => {
                 warn!("  forge: no proven gas improvement (saved={:?}) — keeping original", vr.gas_saved);
                 optimized_code = payload.contract_source.clone();
                 analysis = match vr.gas_saved {
@@ -395,7 +387,7 @@ async fn optimize_contract(
                 };
             }
             // Did not compile → keep original.
-            Ok(Ok(vr)) => {
+            Ok(vr) => {
                 warn!("  forge: optimized did not compile — keeping original");
                 optimized_code = payload.contract_source.clone();
                 analysis = format!(
@@ -403,16 +395,11 @@ async fn optimize_contract(
                     vr.errors.join("; ")
                 );
             }
-            // Forge tooling failed — we can't verify, so don't ship an unverified rewrite.
-            Ok(Err(e)) => {
-                warn!("  forge check errored: {e} — keeping original (could not verify)");
-                optimized_code = payload.contract_source.clone();
-                analysis = format!("Rewrite rejected — could not verify (forge error: {e}). Kept original.");
-            }
+            // Forge errored, timed out, or panicked — can't verify, so don't ship it.
             Err(e) => {
-                warn!("  forge check task panicked: {e} — keeping original (could not verify)");
+                warn!("  forge check failed: {e} — keeping original (could not verify)");
                 optimized_code = payload.contract_source.clone();
-                analysis = "Rewrite rejected — could not verify (forge task panicked). Kept original.".to_string();
+                analysis = format!("Rewrite rejected — could not verify (forge: {e}). Kept original.");
             }
         }
     } else {
