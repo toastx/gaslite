@@ -21,7 +21,11 @@ pub struct ForgeArgs {
 #[derive(Serialize)]
 pub struct ForgeResult {
     pub compiles: bool,
-    pub tests_pass: bool,
+    /// True only when the contract compiled AND a construction-gas number was
+    /// parsed. NOTE: this is *not* a behavioural-equivalence check — the sandbox
+    /// only compiles and measures constructor gas, it does not prove the
+    /// optimized contract behaves identically to the original.
+    pub gas_measured: bool,
     pub gas_original: Option<u64>,
     pub gas_optimized: Option<u64>,
     pub gas_saved: Option<i64>,
@@ -71,12 +75,12 @@ impl Tool for ForgeTool {
         .map_err(|e| ForgeError(format!("forge task panicked: {e}")))?
         .map_err(ForgeError)?;
 
-        let tests_pass = res.compiles && res.gas_optimized.is_some();
+        let gas_measured = res.compiles && res.gas_optimized.is_some();
         let forge_excerpt: String = res.forge_output.chars().take(2000).collect();
 
         Ok(ForgeResult {
             compiles: res.compiles,
-            tests_pass,
+            gas_measured,
             gas_original: res.gas_original,
             gas_optimized: res.gas_optimized,
             gas_saved: res.gas_saved,

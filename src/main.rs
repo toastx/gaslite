@@ -290,6 +290,11 @@ async fn health_check(
     )
 }
 
+/// Render an optional gas figure for user-facing strings ("n/a" when absent).
+fn fmt_gas(g: Option<u64>) -> String {
+    g.map_or_else(|| "n/a".to_string(), |v| v.to_string())
+}
+
 async fn optimize_contract(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<OptimizeRequest>,
@@ -358,41 +363,60 @@ async fn optimize_contract(
 
     let mut optimized_code = utils::strip_code_fences(&raw);
 
-    // 4. Final authoritative forge check — accept only if it still compiles.
+    // 4. Final authoritative forge check. We only return the rewrite when it
+    //    compiles AND demonstrably saves construction gas; otherwise we keep the
+    //    original. Note this proves "compiles + cheaper constructor", NOT
+    //    behavioural equivalence — the sandbox does not test runtime semantics.
     let analysis: String;
     if state.forge_available {
         let orig = payload.contract_source.clone();
         let opt = optimized_code.clone();
         match tokio::task::spawn_blocking(move || forge::run_forge_sandbox(&orig, &opt)).await {
-            Ok(Ok(vr)) if vr.compiles => {
+            // Accept only on a proven gas improvement.
+            Ok(Ok(vr)) if vr.compiles && vr.gas_saved.unwrap_or(0) > 0 => {
+                let saved = vr.gas_saved.unwrap_or(0);
                 info!(
-                    "  forge verified: original={:?} optimized={:?} saved={:?}",
-                    vr.gas_original, vr.gas_optimized, vr.gas_saved
+                    "  forge accepted: original={} optimized={} saved={}",
+                    fmt_gas(vr.gas_original), fmt_gas(vr.gas_optimized), saved
                 );
                 analysis = format!(
-                    "Verified on Mantle fork. Gas original={:?}, optimized={:?}, saved={:?}.",
-                    vr.gas_original, vr.gas_optimized, vr.gas_saved
+                    "Compiled on a Mantle fork; construction gas {} → {} (saved {}). \
+                     Behavioural equivalence is not tested.",
+                    fmt_gas(vr.gas_original), fmt_gas(vr.gas_optimized), saved
                 );
             }
+            // Compiles but no proven improvement (regression, zero, or unmeasured) → keep original.
+            Ok(Ok(vr)) if vr.compiles => {
+                warn!("  forge: no proven gas improvement (saved={:?}) — keeping original", vr.gas_saved);
+                optimized_code = payload.contract_source.clone();
+                analysis = match vr.gas_saved {
+                    Some(s) => format!("Rewrite rejected — no gas improvement (construction gas saved {s}). Kept original."),
+                    None => "Rewrite rejected — construction gas could not be measured. Kept original.".to_string(),
+                };
+            }
+            // Did not compile → keep original.
             Ok(Ok(vr)) => {
-                warn!("  final forge check: optimized did not compile — keeping original");
+                warn!("  forge: optimized did not compile — keeping original");
                 optimized_code = payload.contract_source.clone();
                 analysis = format!(
-                    "Optimization rejected — final compile failed. Errors: {}",
+                    "Rewrite rejected — did not compile. Kept original. Errors: {}",
                     vr.errors.join("; ")
                 );
             }
+            // Forge tooling failed — we can't verify, so don't ship an unverified rewrite.
             Ok(Err(e)) => {
-                warn!("  final forge check errored: {e} — returning agent output unverified");
-                analysis = format!("Optimized (unverified — forge error: {e}).");
+                warn!("  forge check errored: {e} — keeping original (could not verify)");
+                optimized_code = payload.contract_source.clone();
+                analysis = format!("Rewrite rejected — could not verify (forge error: {e}). Kept original.");
             }
             Err(e) => {
-                warn!("  final forge check task panicked: {e}");
-                analysis = "Optimized (unverified — forge task panicked).".to_string();
+                warn!("  forge check task panicked: {e} — keeping original (could not verify)");
+                optimized_code = payload.contract_source.clone();
+                analysis = "Rewrite rejected — could not verify (forge task panicked). Kept original.".to_string();
             }
         }
     } else {
-        analysis = "Optimized (one-shot — forge unavailable, not verified).".to_string();
+        analysis = "Optimized one-shot — forge unavailable, not verified.".to_string();
     }
 
     info!("=== OPTIMIZE COMPLETE ===");
