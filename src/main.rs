@@ -45,6 +45,10 @@ struct AppState {
     deepseek: deepseek::Client,
     embedder: Arc<Embedder>,
     forge_available: bool,
+    /// Result cache keyed on the exact contract source. A hit skips the whole
+    /// agent + forge pipeline. Only successful/one-shot results are cached so
+    /// transient failures can be retried. Cleared on Qdrant reset.
+    cache: std::sync::Mutex<std::collections::HashMap<String, OptimizeResponse>>,
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
@@ -53,7 +57,7 @@ struct OptimizeRequest {
     contract_source: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct OptimizeResponse {
     analysis: String,
     suggested_patterns: Vec<String>,
@@ -129,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         deepseek,
         embedder,
         forge_available,
+        cache: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     // run migration via HTTP
@@ -301,6 +306,12 @@ async fn optimize_contract(
 ) -> Result<Json<OptimizeResponse>, (axum::http::StatusCode, String)> {
     let t0 = std::time::Instant::now();
 
+    // 0. Result cache — identical source returns the prior result instantly.
+    if let Some(hit) = state.cache.lock().unwrap().get(&payload.contract_source).cloned() {
+        info!("optimize: cache HIT ({} bytes) → returned in {:.2?}", payload.contract_source.len(), t0.elapsed());
+        return Ok(Json(hit));
+    }
+
     // 1. Parse the contract: detect category, count optimizable functions, storage layout.
     let (category, function_count, storage_layout) = analyze_contract(&payload.contract_source);
     let category_str = category.unwrap_or("general");
@@ -362,6 +373,10 @@ async fn optimize_contract(
     //    original. Note this proves "compiles + cheaper constructor", NOT
     //    behavioural equivalence — the sandbox does not test runtime semantics.
     let analysis: String;
+    // Whether the result is worth caching: a real optimization or a clean
+    // one-shot. Transient failures (compile error, regression, forge error) are
+    // NOT cached, so an identical request can be retried.
+    let cacheable: bool;
     if state.forge_available {
         match forge::run_forge_sandbox_async(payload.contract_source.clone(), optimized_code.clone()).await {
             // Accept only on a proven gas improvement.
@@ -376,6 +391,7 @@ async fn optimize_contract(
                      Behavioural equivalence is not tested.",
                     fmt_gas(vr.gas_original), fmt_gas(vr.gas_optimized), saved
                 );
+                cacheable = true;
             }
             // Compiles but no proven improvement (regression, zero, or unmeasured) → keep original.
             Ok(vr) if vr.compiles => {
@@ -385,6 +401,7 @@ async fn optimize_contract(
                     Some(s) => format!("Rewrite rejected — no gas improvement (construction gas saved {s}). Kept original."),
                     None => "Rewrite rejected — construction gas could not be measured. Kept original.".to_string(),
                 };
+                cacheable = false;
             }
             // Did not compile → keep original.
             Ok(vr) => {
@@ -394,28 +411,42 @@ async fn optimize_contract(
                     "Rewrite rejected — did not compile. Kept original. Errors: {}",
                     vr.errors.join("; ")
                 );
+                cacheable = false;
             }
             // Forge errored, timed out, or panicked — can't verify, so don't ship it.
             Err(e) => {
                 warn!("  forge check failed: {e} — keeping original (could not verify)");
                 optimized_code = payload.contract_source.clone();
                 analysis = format!("Rewrite rejected — could not verify (forge: {e}). Kept original.");
+                cacheable = false;
             }
         }
     } else {
         analysis = "Optimized one-shot — forge unavailable, not verified.".to_string();
+        cacheable = true;
     }
 
     info!("=== OPTIMIZE COMPLETE ===");
     info!("  patterns : {}", suggested_patterns.len());
+    info!("  cached   : {}", cacheable);
     info!("  elapsed  : {:.2?}", t0.elapsed());
     info!("=========================");
 
-    Ok(Json(OptimizeResponse {
+    let response = OptimizeResponse {
         analysis,
         suggested_patterns,
         optimized_code,
-    }))
+    };
+
+    if cacheable {
+        // Bounded so a flood of distinct inputs can't grow it without limit.
+        let mut cache = state.cache.lock().unwrap();
+        if cache.len() < 1024 {
+            cache.insert(payload.contract_source, response.clone());
+        }
+    }
+
+    Ok(Json(response))
 }
 
 
@@ -518,6 +549,10 @@ async fn reset_collection(
 
     create_qdrant_indexes(&state).await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // The knowledge base changed — cached optimizations are now stale.
+    state.cache.lock().unwrap().clear();
+    info!("  cache   : cleared");
 
     info!("========================");
     Ok("Collection reset successfully")
