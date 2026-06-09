@@ -314,6 +314,7 @@ async fn optimize_contract(
 
     // 1. Parse the contract: detect category, count optimizable functions, storage layout.
     let (category, function_count, storage_layout) = analyze_contract(&payload.contract_source);
+    let t_parse = std::time::Instant::now();
     let category_str = category.unwrap_or("general");
 
     info!("=== OPTIMIZE REQUEST ===");
@@ -353,6 +354,7 @@ async fn optimize_contract(
         }
     };
     info!("  patterns retrieved: {}", suggested_patterns.len());
+    let t_retrieval = std::time::Instant::now();
 
     // 3. Run the rig refinement agent over the whole contract (reuses the cache).
     info!("=== RUNNING REFINEMENT AGENT ===");
@@ -365,6 +367,7 @@ async fn optimize_contract(
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let t_agent = std::time::Instant::now();
 
     let mut optimized_code = utils::strip_code_fences(&raw);
 
@@ -425,11 +428,19 @@ async fn optimize_contract(
         analysis = "Optimized one-shot — forge unavailable, not verified.".to_string();
         cacheable = true;
     }
+    let t_verify = std::time::Instant::now();
 
     info!("=== OPTIMIZE COMPLETE ===");
     info!("  patterns : {}", suggested_patterns.len());
     info!("  cached   : {}", cacheable);
-    info!("  elapsed  : {:.2?}", t0.elapsed());
+    info!(
+        "  timing   : parse {:.2?} | retrieval {:.2?} | agent {:.2?} | final-verify {:.2?}",
+        t_parse - t0,
+        t_retrieval - t_parse,
+        t_agent - t_retrieval,
+        t_verify - t_agent,
+    );
+    info!("  total    : {:.2?}", t0.elapsed());
     info!("=========================");
 
     let response = OptimizeResponse {
