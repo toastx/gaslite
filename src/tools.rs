@@ -1,7 +1,10 @@
-//! `ForgeTool` — a rig `Tool` that compiles and gas-tests an optimized contract
-//! against the original in a Foundry sandbox on a Mantle fork. The refinement
-//! agent calls this to close the loop: on a compile failure or gas regression it
-//! reads the returned errors and tries again.
+//! `FunctionForgeTool` — a rig `Tool` the per-function agent calls to verify a
+//! single optimized function. It splices the candidate function into the
+//! original contract at the function's byte range and compiles the result, so
+//! the agent can refine non-compiling YUL in its loop. Verification is
+//! compile-level (per-function runtime gas via call-tests comes later).
+
+use std::sync::Arc;
 
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::Tool;
@@ -9,22 +12,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::forge::run_forge_sandbox_async;
+use crate::utils::strip_code_fences;
 
 #[derive(Deserialize)]
-pub struct ForgeArgs {
-    /// Full original contract source.
-    pub original_code: String,
-    /// Full optimized contract source.
-    pub optimized_code: String,
+pub struct FnForgeArgs {
+    /// The complete optimized function (signature + body), no contract wrapper.
+    pub optimized_function: String,
 }
 
 #[derive(Serialize)]
 pub struct ForgeResult {
     pub compiles: bool,
-    /// True only when the contract compiled AND a construction-gas number was
-    /// parsed. NOTE: this is *not* a behavioural-equivalence check — the sandbox
-    /// only compiles and measures constructor gas, it does not prove the
-    /// optimized contract behaves identically to the original.
+    /// True only when it compiled AND a construction-gas number was parsed.
+    /// NOTE: not a behavioural-equivalence check, and the gas is whole-contract
+    /// *construction* gas — not this function's runtime gas.
     pub gas_measured: bool,
     pub gas_original: Option<u64>,
     pub gas_optimized: Option<u64>,
@@ -38,37 +39,62 @@ pub struct ForgeResult {
 #[error("forge tool error: {0}")]
 pub struct ForgeError(String);
 
-pub struct ForgeTool;
+/// Verifies one optimized function by splicing it into the original contract.
+pub struct FunctionForgeTool {
+    /// The full original contract source.
+    pub original: Arc<str>,
+    /// Byte range of the target function within `original`.
+    pub start: usize,
+    pub end: usize,
+}
 
-impl Tool for ForgeTool {
+impl FunctionForgeTool {
+    pub fn new(original: Arc<str>, start: usize, end: usize) -> Self {
+        Self { original, start, end }
+    }
+}
+
+impl Tool for FunctionForgeTool {
     const NAME: &'static str = "forge_verify";
 
     type Error = ForgeError;
-    type Args = ForgeArgs;
+    type Args = FnForgeArgs;
     type Output = ForgeResult;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Compile and gas-test an optimized Solidity contract against the original \
-                          on a Mantle fork. Returns whether it compiles, gas saved (negative = \
-                          regression), and any compiler/test errors. Call this after producing an \
-                          optimized contract. If it does not compile or gas does not improve, fix \
-                          the code using the returned errors and call again."
+            description: "Compile-check your optimized function. Pass ONLY the complete optimized \
+                          function (signature + body); it is spliced into the original contract and \
+                          compiled on a Mantle fork. Returns whether it compiles and any compiler \
+                          errors. If it does not compile, fix the function using the errors and call \
+                          again."
                 .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "original_code":  { "type": "string", "description": "Full original contract source" },
-                    "optimized_code": { "type": "string", "description": "Full optimized contract source" }
+                    "optimized_function": {
+                        "type": "string",
+                        "description": "The complete optimized function, no contract wrapper"
+                    }
                 },
-                "required": ["original_code", "optimized_code"]
+                "required": ["optimized_function"]
             }),
         }
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let res = run_forge_sandbox_async(args.original_code, args.optimized_code)
+        let optimized_fn = strip_code_fences(&args.optimized_function);
+
+        // Splice the candidate function into the original contract.
+        let mut spliced = self.original.to_string();
+        if self.end <= spliced.len() {
+            spliced.replace_range(self.start..self.end, &optimized_fn);
+        } else {
+            return Err(ForgeError("function byte range out of bounds".to_string()));
+        }
+
+        let res = run_forge_sandbox_async(self.original.to_string(), spliced)
             .await
             .map_err(ForgeError)?;
 

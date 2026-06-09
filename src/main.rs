@@ -37,6 +37,8 @@ use solang_parser::pt::{ContractPart, Loc, SourceUnitPart};
 // ── constants ─────────────────────────────────────────────────────────────────
 pub const COLLECTION: &str = "gaslite_patterns";
 const VECTOR_DIM: u64 = 384;
+/// Max functions optimized concurrently (bounds in-flight DeepSeek requests).
+const MAX_PARALLEL_FUNCS: usize = 6;
 
 // ── app state ─────────────────────────────────────────────────────────────────
 struct AppState {
@@ -295,6 +297,9 @@ async fn health_check(
     )
 }
 
+/// Per-function optimization result: `(start, end, original_fn, optimized, pattern_ids)`.
+type FnOptResult = (usize, usize, String, Result<String, String>, Vec<String>);
+
 /// Render an optional gas figure for user-facing strings ("n/a" when absent).
 fn fmt_gas(g: Option<u64>) -> String {
     g.map_or_else(|| "n/a".to_string(), |v| v.to_string())
@@ -312,64 +317,85 @@ async fn optimize_contract(
         return Ok(Json(hit));
     }
 
-    // 1. Parse the contract: detect category, count optimizable functions, storage layout.
-    let (category, function_count, storage_layout) = analyze_contract(&payload.contract_source);
+    // 1. Parse the contract: detect category, extract functions, storage layout.
+    let (category, functions, storage_layout) = analyze_contract(&payload.contract_source);
     let t_parse = std::time::Instant::now();
     let category_str = category.unwrap_or("general");
 
     info!("=== OPTIMIZE REQUEST ===");
     info!("  contract : {} bytes", payload.contract_source.len());
     info!("  detected : {}", category_str);
-    info!("  functions: {}", function_count);
+    info!("  functions: {}", functions.len());
     info!("  forge    : {}", if state.forge_available { "closed-loop" } else { "one-shot" });
     info!("========================");
 
-    if function_count == 0 {
+    if functions.is_empty() {
         return Err((axum::http::StatusCode::BAD_REQUEST,
             "No optimizable functions found — ensure the contract parses correctly".to_string()));
     }
 
-    // 2. Build the retrieval index (category + contract baked in). Retrieval is
-    //    memoised inside the index, so the composed search runs once and is reused
-    //    by the agent's dynamic_context on every turn.
-    let adapter = FastembedAdapter::new(state.embedder.clone());
-    let index = GasliteIndex::new(
-        state.qdrant.clone(),
-        state.db.clone(),
-        adapter,
-        category,
-        payload.contract_source.clone(),
-    );
+    // 2. Optimize every function concurrently — one rig agent per function,
+    //    bounded by a semaphore. Each agent does its own retrieval and (when
+    //    forge is available) its own compile loop against the original contract.
+    info!("=== OPTIMIZING {} FUNCTIONS CONCURRENTLY ===", functions.len());
+    let original: Arc<str> = Arc::from(payload.contract_source.as_str());
+    let storage: Arc<str> = Arc::from(storage_layout.as_str());
+    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_FUNCS));
 
-    // Pattern ids for the response — this populates the shared cache.
-    let suggested_patterns = match index.pattern_ids().await {
-        Ok(mut ids) => {
-            ids.sort();
-            ids.dedup();
-            ids
-        }
-        Err(e) => {
-            warn!("  ! pattern retrieval failed: {e}");
-            vec![]
-        }
-    };
-    info!("  patterns retrieved: {}", suggested_patterns.len());
-    let t_retrieval = std::time::Instant::now();
+    let mut set: tokio::task::JoinSet<FnOptResult> = tokio::task::JoinSet::new();
+    for func in functions {
+        let state = state.clone();
+        let permit_sem = sem.clone();
+        let original = original.clone();
+        let storage = storage.clone();
+        let FunctionInfo { name, source: fsrc, start, end } = func;
+        set.spawn(async move {
+            let _permit = permit_sem.acquire().await.expect("semaphore closed");
+            let adapter = FastembedAdapter::new(state.embedder.clone());
+            let index = GasliteIndex::new(
+                state.qdrant.clone(), state.db.clone(), adapter, category, fsrc.clone(),
+            );
+            let pattern_ids = index.pattern_ids().await.unwrap_or_default();
+            let optimized = rig_agent::optimize_function(
+                &state.deepseek, index, &storage, original.clone(),
+                &name, &fsrc, start, end, state.forge_available,
+            ).await;
+            (start, end, fsrc, optimized, pattern_ids)
+        });
+    }
 
-    // 3. Run the rig refinement agent over the whole contract (reuses the cache).
-    info!("=== RUNNING REFINEMENT AGENT ===");
-    let raw = rig_agent::optimize_contract(
-        &state.deepseek,
-        index,
-        &storage_layout,
-        &payload.contract_source,
-        state.forge_available,
-    )
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut results = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(tuple) => results.push(tuple),
+            Err(e) => warn!("  ! function task panicked: {e}"),
+        }
+    }
     let t_agent = std::time::Instant::now();
 
-    let mut optimized_code = utils::strip_code_fences(&raw);
+    // 3. Splice optimized functions back (descending start keeps offsets valid),
+    //    and aggregate pattern ids for the response.
+    results.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut optimized_code = payload.contract_source.clone();
+    let mut optimized_count = 0usize;
+    let mut all_patterns: Vec<String> = Vec::new();
+    for (start, end, fsrc, optimized, pattern_ids) in &results {
+        all_patterns.extend(pattern_ids.iter().cloned());
+        match optimized {
+            Ok(opt) => {
+                let opt = utils::strip_code_fences(opt);
+                if &opt != fsrc && *end <= optimized_code.len() {
+                    optimized_code.replace_range(*start..*end, &opt);
+                    optimized_count += 1;
+                }
+            }
+            Err(e) => warn!("  ! {e}"),
+        }
+    }
+    all_patterns.sort();
+    all_patterns.dedup();
+    let suggested_patterns = all_patterns;
+    info!("  functions optimized: {}/{}", optimized_count, results.len());
 
     // 4. Final authoritative forge check. We only return the rewrite when it
     //    compiles AND demonstrably saves construction gas; otherwise we keep the
@@ -434,10 +460,9 @@ async fn optimize_contract(
     info!("  patterns : {}", suggested_patterns.len());
     info!("  cached   : {}", cacheable);
     info!(
-        "  timing   : parse {:.2?} | retrieval {:.2?} | agent {:.2?} | final-verify {:.2?}",
+        "  timing   : parse {:.2?} | functions {:.2?} | final-verify {:.2?}",
         t_parse - t0,
-        t_retrieval - t_parse,
-        t_agent - t_retrieval,
+        t_agent - t_parse,
         t_verify - t_agent,
     );
     info!("  total    : {:.2?}", t0.elapsed());
@@ -461,17 +486,24 @@ async fn optimize_contract(
 }
 
 
-// ── Contract analysis: category + optimizable-function count + storage layout ──
-// The agent works on the whole contract, so we only need the detected category,
-// how many named functions with a body exist (to reject non-optimizable input),
-// and the storage variable declarations to feed the prompt.
-fn analyze_contract(source: &str) -> (Option<&'static str>, usize, String) {
+// ── Contract analysis: category + per-function extraction + storage layout ──
+// Each named function (with a body) is extracted with its exact source text and
+// byte range, so we can optimize functions concurrently and splice the results
+// back at their original offsets.
+struct FunctionInfo {
+    name: String,
+    source: String,
+    start: usize,
+    end: usize,
+}
+
+fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, String) {
     let Ok((su, _)) = solang_parser::parse(source, 0) else {
-        return (detect_category_fallback(source), 0, String::new());
+        return (detect_category_fallback(source), vec![], String::new());
     };
 
     let mut category: Option<&'static str> = None;
-    let mut function_count: usize = 0;
+    let mut functions: Vec<FunctionInfo> = Vec::new();
     let mut storage_vars: Vec<String> = Vec::new();
 
     for part in su.0 {
@@ -502,18 +534,25 @@ fn analyze_contract(source: &str) -> (Option<&'static str>, usize, String) {
                     }
                 }
                 ContractPart::FunctionDefinition(func) => {
-                    // Count only named functions with a body (skip constructor/
+                    // Extract only named functions with a body (skip constructor/
                     // fallback/receive and abstract declarations).
-                    if func.name.is_some() && func.body.is_some() {
-                        function_count += 1;
-                    }
+                    let Some(name_ident) = &func.name else { continue };
+                    let Some(_) = &func.body else { continue };
+                    let Loc::File(_, start, end) = func.loc else { continue };
+                    let Some(func_text) = source.get(start..end) else { continue };
+                    functions.push(FunctionInfo {
+                        name: name_ident.name.clone(),
+                        source: func_text.to_string(),
+                        start,
+                        end,
+                    });
                 }
                 _ => {}
             }
         }
     }
 
-    (category, function_count, storage_vars.join("\n"))
+    (category, functions, storage_vars.join("\n"))
 }
 
 fn detect_category_fallback(source: &str) -> Option<&'static str> {

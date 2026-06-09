@@ -4,12 +4,18 @@
 //! a Mantle fork → on compile failure or gas regression, refine and retry,
 //! capped by `max_turns`.
 
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use rig_core::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig_core::client::CompletionClient;
-use rig_core::completion::Prompt;
+use rig_core::completion::{CompletionModel, CompletionResponse, Prompt};
+use rig_core::message::Message;
 use rig_core::providers::deepseek;
+use tracing::info;
 
 use crate::retrieval::GasliteIndex;
-use crate::tools::ForgeTool;
+use crate::tools::FunctionForgeTool;
 
 /// Max agent turns when the forge loop is active (1 generate + refinements).
 const FORGE_MAX_TURNS: usize = 4;
@@ -62,40 +68,45 @@ pub const SYSTEM_PROMPT: &str = "You are Gaslite, a gas optimization engine for 
     Correctness is absolute. An optimization that changes observable behaviour \
     is not an optimization — it is a bug.";
 
-/// Run the refinement agent over a whole contract. Returns the agent's final
-/// message (the optimized contract, possibly fenced — caller strips fences).
+/// Optimize a SINGLE function. Returns the agent's final message (the optimized
+/// function, possibly fenced — caller strips fences). Designed to be run
+/// concurrently, one agent per function.
 ///
-/// `use_forge` toggles the closed loop: when false (Foundry unavailable) the
-/// agent runs one-shot with no tool, preserving the old non-verified behaviour.
-pub async fn optimize_contract(
+/// `use_forge` toggles the per-function compile loop: the agent calls
+/// `forge_verify` (FunctionForgeTool), which splices the candidate into the
+/// original contract and compiles it; on a compile failure the agent refines.
+#[allow(clippy::too_many_arguments)]
+pub async fn optimize_function(
     client: &deepseek::Client,
     index: GasliteIndex,
     storage_layout: &str,
-    original_contract: &str,
+    original: Arc<str>,
+    fn_name: &str,
+    fn_source: &str,
+    fn_start: usize,
+    fn_end: usize,
     use_forge: bool,
 ) -> Result<String, String> {
     let context = format!(
         "STORAGE LAYOUT:\n{storage_layout}\n\n\
-         ORIGINAL CONTRACT:\n```solidity\n{original_contract}\n```"
+         FUNCTION TO OPTIMIZE:\n```solidity\n{fn_source}\n```"
     );
 
     let forge_step = if use_forge {
-        "After producing the optimized contract, call forge_verify with original_code set to the \
-         ORIGINAL CONTRACT exactly as given and optimized_code set to your rewrite. If it does not \
-         compile (compiles=false) or gas does not improve (gas_saved <= 0), fix the code using the \
-         returned errors and call forge_verify again. Stop once it compiles and gas_saved > 0, or \
-         after you have exhausted your attempts.\n"
+        "After producing the optimized function, call forge_verify with optimized_function set to \
+         your rewrite. If it does not compile (compiles=false), fix the function using the returned \
+         errors and call forge_verify again. Stop once it compiles, or after exhausting your attempts.\n"
     } else {
         ""
     };
 
     let user = format!(
-        "Optimize the gas-heavy functions in the ORIGINAL CONTRACT by applying the RETRIEVED \
-         PATTERNS as templates, adapting slot derivations and variable names to this contract's \
-         storage layout. Preserve every function's observable behaviour and signature.\n\
+        "Optimize ONLY this function by applying the RETRIEVED PATTERNS as templates, adapting slot \
+         derivations and variable names to the contract's storage layout. Preserve the function's \
+         observable behaviour and signature.\n\
          {forge_step}\n\
-         Return the COMPLETE optimized contract in a single ```solidity code block — the full \
-         source, compilable as-is, with the same contract name and imports."
+         Return ONLY the complete optimized function (signature + body) in a single ```solidity code \
+         block — no contract wrapper, no imports."
     );
 
     let builder = client
@@ -104,18 +115,116 @@ pub async fn optimize_contract(
         .context(&context)
         .dynamic_context(CONTEXT_SAMPLES, index)
         .temperature(0.1)
-        .max_tokens(8192);
+        .max_tokens(4096);
 
+    // Per-turn instrumentation (labeled with the function name since agents run
+    // concurrently and their logs interleave).
+    let hook = TimingHook::new(fn_name);
     let result = if use_forge {
         builder
-            .tool(ForgeTool)
+            .tool(FunctionForgeTool::new(original, fn_start, fn_end))
             .build()
             .prompt(user)
+            .with_hook(hook.clone())
             .max_turns(FORGE_MAX_TURNS)
             .await
     } else {
-        builder.build().prompt(user).max_turns(1).await
+        builder.build().prompt(user).with_hook(hook.clone()).max_turns(1).await
     };
 
-    result.map_err(|e| format!("agent prompt failed: {e}"))
+    let (turns, llm_total, tool_total) = hook.summary();
+    info!(
+        "  [{}] {} turn(s) | LLM {:.2?} | forge {:.2?}",
+        fn_name, turns, llm_total, tool_total
+    );
+
+    result.map_err(|e| format!("[{fn_name}] agent prompt failed: {e}"))
+}
+
+// ── per-turn timing hook ──────────────────────────────────────────────────────
+#[derive(Default)]
+struct TurnTimer {
+    turn: usize,
+    llm_start: Option<Instant>,
+    tool_start: Option<Instant>,
+    llm_total: Duration,
+    tool_total: Duration,
+}
+
+/// A rig `PromptHook` that times every LLM call and tool call in the agent loop,
+/// labeled with the function name (agents run concurrently).
+#[derive(Clone)]
+struct TimingHook {
+    label: Arc<str>,
+    state: Arc<Mutex<TurnTimer>>,
+}
+
+impl TimingHook {
+    fn new(label: &str) -> Self {
+        Self {
+            label: Arc::from(label),
+            state: Arc::new(Mutex::new(TurnTimer::default())),
+        }
+    }
+
+    /// `(turns, total LLM time, total in-loop tool time)`.
+    fn summary(&self) -> (usize, Duration, Duration) {
+        let s = self.state.lock().unwrap();
+        (s.turn, s.llm_total, s.tool_total)
+    }
+}
+
+impl<M: CompletionModel> PromptHook<M> for TimingHook {
+    async fn on_completion_call(&self, _prompt: &Message, _history: &[Message]) -> HookAction {
+        let mut s = self.state.lock().unwrap();
+        s.turn += 1;
+        s.llm_start = Some(Instant::now());
+        HookAction::cont()
+    }
+
+    async fn on_completion_response(
+        &self,
+        _prompt: &Message,
+        _response: &CompletionResponse<M::Response>,
+    ) -> HookAction {
+        let mut s = self.state.lock().unwrap();
+        if let Some(start) = s.llm_start.take() {
+            let d = start.elapsed();
+            s.llm_total += d;
+            let turn = s.turn;
+            drop(s);
+            info!("  [{}] turn {turn}: LLM {d:.2?}", self.label);
+        }
+        HookAction::cont()
+    }
+
+    async fn on_tool_call(
+        &self,
+        _tool_name: &str,
+        _tool_call_id: Option<String>,
+        _internal_call_id: &str,
+        _args: &str,
+    ) -> ToolCallHookAction {
+        self.state.lock().unwrap().tool_start = Some(Instant::now());
+        ToolCallHookAction::cont()
+    }
+
+    async fn on_tool_result(
+        &self,
+        tool_name: &str,
+        _tool_call_id: Option<String>,
+        _internal_call_id: &str,
+        _args: &str,
+        _result: &str,
+    ) -> HookAction {
+        let mut s = self.state.lock().unwrap();
+        if let Some(start) = s.tool_start.take() {
+            let d = start.elapsed();
+            s.tool_total += d;
+            let turn = s.turn;
+            drop(s);
+            info!("  [{}] turn {turn}: tool {tool_name} {d:.2?}", self.label);
+        }
+        HookAction::cont()
+    }
 }
