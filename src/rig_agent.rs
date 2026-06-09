@@ -16,6 +16,7 @@ use tracing::info;
 
 use crate::retrieval::GasliteIndex;
 use crate::tools::FunctionForgeTool;
+use crate::utils::strip_code_fences;
 
 /// Max agent turns when the forge loop is active (1 generate + refinements).
 const FORGE_MAX_TURNS: usize = 4;
@@ -132,11 +133,24 @@ pub async fn optimize_function(
         builder.build().prompt(user).with_hook(hook.clone()).max_turns(1).await
     };
 
+    let captured = hook.captured();
     let (turns, llm_total, tool_total) = hook.summary();
     info!(
-        "  [{}] {} turn(s) | LLM {:.2?} | forge {:.2?}",
-        fn_name, turns, llm_total, tool_total
+        "  [{}] {} turn(s) | LLM {:.2?} | forge {:.2?}{}",
+        fn_name,
+        turns,
+        llm_total,
+        tool_total,
+        if captured.is_some() { " | early-exit" } else { "" }
     );
+
+    // When the forge loop verified a compiling candidate, the hook captured it
+    // from the tool-call args and terminated the loop early — skipping a redundant
+    // LLM turn that would only re-emit the same function. Prefer that candidate
+    // over the (cancelled) prompt result.
+    if let Some(verified) = captured {
+        return Ok(verified);
+    }
 
     result.map_err(|e| format!("[{fn_name}] agent prompt failed: {e}"))
 }
@@ -157,6 +171,9 @@ struct TurnTimer {
 struct TimingHook {
     label: Arc<str>,
     state: Arc<Mutex<TurnTimer>>,
+    /// Set to the verified function (from the `forge_verify` args) the first time
+    /// the tool reports `compiles:true`; signals the loop was terminated early.
+    captured: Arc<Mutex<Option<String>>>,
 }
 
 impl TimingHook {
@@ -164,6 +181,7 @@ impl TimingHook {
         Self {
             label: Arc::from(label),
             state: Arc::new(Mutex::new(TurnTimer::default())),
+            captured: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -171,6 +189,11 @@ impl TimingHook {
     fn summary(&self) -> (usize, Duration, Duration) {
         let s = self.state.lock().unwrap();
         (s.turn, s.llm_total, s.tool_total)
+    }
+
+    /// The verified candidate captured on early exit, if any.
+    fn captured(&self) -> Option<String> {
+        self.captured.lock().unwrap().clone()
     }
 }
 
@@ -214,17 +237,39 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         tool_name: &str,
         _tool_call_id: Option<String>,
         _internal_call_id: &str,
-        _args: &str,
-        _result: &str,
+        args: &str,
+        result: &str,
     ) -> HookAction {
-        let mut s = self.state.lock().unwrap();
-        if let Some(start) = s.tool_start.take() {
-            let d = start.elapsed();
-            s.tool_total += d;
-            let turn = s.turn;
-            drop(s);
-            info!("  [{}] turn {turn}: tool {tool_name} {d:.2?}", self.label);
+        {
+            let mut s = self.state.lock().unwrap();
+            if let Some(start) = s.tool_start.take() {
+                let d = start.elapsed();
+                s.tool_total += d;
+                let turn = s.turn;
+                drop(s);
+                info!("  [{}] turn {turn}: tool {tool_name} {d:.2?}", self.label);
+            }
         }
+
+        // Once forge_verify confirms the candidate compiles, we have everything we
+        // need: the verified function is in the tool-call args. Capture it and
+        // terminate the loop, skipping the redundant LLM turn that would only
+        // re-emit the same code. On a compile failure we continue so the model can
+        // refine using the returned errors.
+        if tool_name == FunctionForgeTool::NAME {
+            let compiles = serde_json::from_str::<serde_json::Value>(result)
+                .ok()
+                .and_then(|v| v.get("compiles").and_then(|c| c.as_bool()))
+                .unwrap_or(false);
+            if compiles
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(args)
+                && let Some(f) = v.get("optimized_function").and_then(|x| x.as_str())
+            {
+                *self.captured.lock().unwrap() = Some(strip_code_fences(f).to_string());
+                return HookAction::terminate("forge_verify compiled — skipping final turn");
+            }
+        }
+
         HookAction::cont()
     }
 }

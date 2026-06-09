@@ -18,9 +18,11 @@ use rig_core::vector_store::{VectorStoreError, VectorStoreIndex};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::OnceCell;
+use tracing::info;
 
 use crate::db::{Turso, TursoArg};
 use crate::embedding::FastembedAdapter;
+use crate::normalize::PatternMatcher;
 use crate::COLLECTION;
 
 const TOKEN_CATS: [&str; 5] = ["erc20", "erc721", "erc1155", "erc2981", "accounts"];
@@ -34,8 +36,13 @@ pub struct GasliteIndex {
     db: Arc<Turso>,
     embedder: FastembedAdapter,
     category: Option<&'static str>,
-    /// The contract source — the fixed retrieval query for this request.
+    /// The function source — the fixed retrieval query for this request.
     query: String,
+    /// Deterministic structural matcher (the "Seeker") — the second retrieval
+    /// signal alongside embedding search.
+    matcher: Arc<PatternMatcher>,
+    /// Function name, for attributable logs (agents run concurrently).
+    label: Arc<str>,
     /// Memoised composed-search result, shared across clones (rig clones the
     /// index per turn) so the search runs at most once.
     cache: Arc<OnceCell<Vec<Hit>>>,
@@ -48,6 +55,8 @@ impl GasliteIndex {
         embedder: FastembedAdapter,
         category: Option<&'static str>,
         query: String,
+        matcher: Arc<PatternMatcher>,
+        label: impl Into<Arc<str>>,
     ) -> Self {
         Self {
             qdrant,
@@ -55,6 +64,8 @@ impl GasliteIndex {
             embedder,
             category,
             query,
+            matcher,
+            label: label.into(),
             cache: Arc::new(OnceCell::new()),
         }
     }
@@ -198,6 +209,44 @@ impl GasliteIndex {
                 out.push((hit.score as f64, id, text));
             }
         }
+
+        // 4. Structural ("Seeker") matches — deterministic, name-agnostic. The
+        //    second signal alongside embedding search (GasAgent-style dual retrieval).
+        let struct_ids = self.matcher.match_function(&self.query);
+        let mut struct_added = 0usize;
+        for id in &struct_ids {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let rows = self
+                .db
+                .query(
+                    "SELECT title, explanation, yul_optimized, risk_level, when_not_to_apply \
+                     FROM optimization_patterns WHERE id = ?",
+                    vec![TursoArg::Text(id.clone())],
+                )
+                .await
+                .map_err(|e| VectorStoreError::DatastoreError(e.into()))?;
+            if let Some(row) = rows.first() {
+                let get = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let text = format!(
+                    "PATTERN ID: {} (structural match)\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
+                    id, get("title"), get("explanation"), get("yul_optimized"), get("risk_level"), get("when_not_to_apply"),
+                );
+                // Deterministic hits get top score.
+                out.push((1.0, id.clone(), text));
+                struct_added += 1;
+            }
+        }
+
+        info!(
+            "  [{}] retrieval: {} patterns ({} embedding+antipattern, {} structural{})",
+            self.label,
+            out.len(),
+            out.len() - struct_added,
+            struct_added,
+            if struct_ids.is_empty() { String::new() } else { format!(" {struct_ids:?}") },
+        );
 
         Ok(out)
     }

@@ -4,6 +4,7 @@ mod ai;
 mod db;
 mod embedding;
 mod forge;
+mod normalize;
 mod retrieval;
 mod rig_agent;
 mod tools;
@@ -47,10 +48,38 @@ struct AppState {
     deepseek: deepseek::Client,
     embedder: Arc<Embedder>,
     forge_available: bool,
-    /// Result cache keyed on the exact contract source. A hit skips the whole
-    /// agent + forge pipeline. Only successful/one-shot results are cached so
-    /// transient failures can be retried. Cleared on Qdrant reset.
+    /// Result cache keyed on the *normalized* contract source (comments/whitespace
+    /// stripped) — see `normalize::lexical_key`. A hit skips the whole agent +
+    /// forge pipeline. Only successful/one-shot results are cached so transient
+    /// failures can be retried. Cleared on Qdrant reset.
     cache: std::sync::Mutex<std::collections::HashMap<String, OptimizeResponse>>,
+    /// Deterministic structural pattern matcher (the "Seeker"), rebuilt from the
+    /// knowledge base on startup and after ingest/reset. Read-snapshotted per
+    /// request so reads never block writes.
+    pattern_matcher: std::sync::RwLock<Arc<normalize::PatternMatcher>>,
+}
+
+/// Load the structural pattern matcher from the knowledge base (Turso).
+async fn load_pattern_matcher(db: &Turso) -> normalize::PatternMatcher {
+    let rows = match db
+        .query(
+            "SELECT id, solidity_before FROM optimization_patterns WHERE solidity_before != ''",
+            vec![],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!("pattern matcher: KB query failed: {e}");
+            return normalize::PatternMatcher::default();
+        }
+    };
+    let pairs = rows.into_iter().filter_map(|row| {
+        let id = row.get("id")?.as_str()?.to_string();
+        let before = row.get("solidity_before")?.as_str()?.to_string();
+        Some((id, before))
+    });
+    normalize::PatternMatcher::build(pairs)
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
@@ -136,6 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         embedder,
         forge_available,
         cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        pattern_matcher: std::sync::RwLock::new(Arc::new(normalize::PatternMatcher::default())),
     });
 
     // run migration via HTTP
@@ -169,6 +199,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     create_qdrant_indexes(&state)
         .await
         .expect("Failed to create Qdrant indexes");
+
+    // Build the structural "Seeker" matcher from the knowledge base.
+    {
+        let matcher = load_pattern_matcher(&state.db).await;
+        info!("structural matcher: {} pattern templates loaded", matcher.len());
+        *state.pattern_matcher.write().unwrap() = Arc::new(matcher);
+    }
 
     let router = Router::new()
         .route("/health", get(health_check))
@@ -311,9 +348,11 @@ async fn optimize_contract(
 ) -> Result<Json<OptimizeResponse>, (axum::http::StatusCode, String)> {
     let t0 = std::time::Instant::now();
 
-    // 0. Result cache — identical source returns the prior result instantly.
-    if let Some(hit) = state.cache.lock().unwrap().get(&payload.contract_source).cloned() {
-        info!("optimize: cache HIT ({} bytes) → returned in {:.2?}", payload.contract_source.len(), t0.elapsed());
+    // 0. Result cache — keyed on the NORMALIZED source (comments/whitespace
+    //    stripped), so formatting-only differences still hit.
+    let cache_key = normalize::lexical_key(&payload.contract_source);
+    if let Some(hit) = state.cache.lock().unwrap().get(&cache_key).cloned() {
+        info!("optimize: cache HIT (normalized key) → returned in {:.2?}", t0.elapsed());
         return Ok(Json(hit));
     }
 
@@ -352,8 +391,10 @@ async fn optimize_contract(
         set.spawn(async move {
             let _permit = permit_sem.acquire().await.expect("semaphore closed");
             let adapter = FastembedAdapter::new(state.embedder.clone());
+            let matcher = state.pattern_matcher.read().unwrap().clone();
             let index = GasliteIndex::new(
-                state.qdrant.clone(), state.db.clone(), adapter, category, fsrc.clone(),
+                state.qdrant.clone(), state.db.clone(), adapter, category,
+                fsrc.clone(), matcher, name.clone(),
             );
             let pattern_ids = index.pattern_ids().await.unwrap_or_default();
             let optimized = rig_agent::optimize_function(
@@ -478,7 +519,7 @@ async fn optimize_contract(
         // Bounded so a flood of distinct inputs can't grow it without limit.
         let mut cache = state.cache.lock().unwrap();
         if cache.len() < 1024 {
-            cache.insert(payload.contract_source, response.clone());
+            cache.insert(cache_key, response.clone());
         }
     }
 
@@ -764,6 +805,13 @@ async fn ingest_local_files(
         warn!("    ! {} — {}", id, reason);
     }
     info!("======================");
+
+    // Refresh the structural matcher with the newly ingested patterns.
+    {
+        let matcher = load_pattern_matcher(&state.db).await;
+        info!("  structural matcher: {} templates (rebuilt)", matcher.len());
+        *state.pattern_matcher.write().unwrap() = Arc::new(matcher);
+    }
 
     Ok(Json(IngestLocalResponse { successful_patterns: successful, failed_patterns: failed }))
 }
