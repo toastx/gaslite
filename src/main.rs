@@ -59,6 +59,37 @@ struct AppState {
     pattern_matcher: std::sync::RwLock<Arc<normalize::PatternMatcher>>,
 }
 
+/// L2 cache read — fetch a stored optimization from Turso by normalized key.
+async fn db_cache_get(db: &Turso, key: &str) -> Option<OptimizeResponse> {
+    let rows = db
+        .query(
+            "SELECT response FROM optimize_cache WHERE cache_key = ?",
+            vec![TursoArg::Text(key.to_string())],
+        )
+        .await
+        .ok()?;
+    let json = rows.first()?.get("response")?.as_str()?;
+    serde_json::from_str::<OptimizeResponse>(json).ok()
+}
+
+/// L2 cache write — persist an optimization to Turso (write-through).
+async fn db_cache_put(db: &Turso, key: &str, resp: &OptimizeResponse) -> Result<(), String> {
+    let json = serde_json::to_string(resp).map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    db.execute(
+        "INSERT OR REPLACE INTO optimize_cache (cache_key, response, created_at) VALUES (?,?,?)",
+        vec![
+            TursoArg::Text(key.to_string()),
+            TursoArg::Text(json),
+            TursoArg::Integer(now.to_string()),
+        ],
+    )
+    .await
+}
+
 /// Load the structural pattern matcher from the knowledge base (Turso).
 async fn load_pattern_matcher(db: &Turso) -> normalize::PatternMatcher {
     let rows = match db
@@ -88,7 +119,7 @@ struct OptimizeRequest {
     contract_source: String,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct OptimizeResponse {
     analysis: String,
     suggested_patterns: Vec<String>,
@@ -195,6 +226,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         .expect("Migration failed");
+
+    // Durable result cache (survives restarts) — L2 behind the in-memory L1.
+    state
+        .db
+        .execute(
+            "CREATE TABLE IF NOT EXISTS optimize_cache (
+                cache_key  TEXT PRIMARY KEY,
+                response   TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )",
+            vec![],
+        )
+        .await
+        .expect("optimize_cache migration failed");
 
     create_qdrant_indexes(&state)
         .await
@@ -353,10 +398,17 @@ async fn optimize_contract(
     let t0 = std::time::Instant::now();
 
     // 0. Result cache — keyed on the NORMALIZED source (comments/whitespace
-    //    stripped), so formatting-only differences still hit.
+    //    stripped), so formatting-only differences still hit. L1 = in-memory,
+    //    L2 = Turso (durable across restarts).
     let cache_key = normalize::lexical_key(&payload.contract_source);
     if let Some(hit) = state.cache.lock().unwrap().get(&cache_key).cloned() {
-        info!("optimize: cache HIT (normalized key) → returned in {:.2?}", t0.elapsed());
+        info!("optimize: cache HIT (L1 memory) → returned in {:.2?}", t0.elapsed());
+        return Ok(Json(hit));
+    }
+    if let Some(hit) = db_cache_get(&state.db, &cache_key).await {
+        info!("optimize: cache HIT (L2 turso) → returned in {:.2?}", t0.elapsed());
+        // Warm L1 so subsequent hits are instant.
+        state.cache.lock().unwrap().insert(cache_key.clone(), hit.clone());
         return Ok(Json(hit));
     }
 
@@ -520,10 +572,16 @@ async fn optimize_contract(
     };
 
     if cacheable {
-        // Bounded so a flood of distinct inputs can't grow it without limit.
-        let mut cache = state.cache.lock().unwrap();
-        if cache.len() < 1024 {
-            cache.insert(cache_key, response.clone());
+        // L1: in-memory, bounded so a flood of distinct inputs can't grow it.
+        {
+            let mut cache = state.cache.lock().unwrap();
+            if cache.len() < 1024 {
+                cache.insert(cache_key.clone(), response.clone());
+            }
+        }
+        // L2: Turso (durable). Best-effort — a write failure doesn't fail the request.
+        if let Err(e) = db_cache_put(&state.db, &cache_key, &response).await {
+            warn!("cache: L2 turso write failed: {e}");
         }
     }
 
@@ -572,10 +630,10 @@ fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, S
         for cp in &def.parts {
             match cp {
                 ContractPart::VariableDefinition(var) => {
-                    if let Loc::File(_, start, end) = var.loc {
-                        if let Some(text) = source.get(start..end) {
-                            storage_vars.push(text.trim().to_string());
-                        }
+                    if let Loc::File(_, start, end) = var.loc
+                        && let Some(text) = source.get(start..end)
+                    {
+                        storage_vars.push(text.trim().to_string());
                     }
                 }
                 ContractPart::FunctionDefinition(func) => {
@@ -645,9 +703,12 @@ async fn reset_collection(
     create_qdrant_indexes(&state).await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    // The knowledge base changed — cached optimizations are now stale.
+    // The knowledge base changed — cached optimizations are now stale (L1 + L2).
     state.cache.lock().unwrap().clear();
-    info!("  cache   : cleared");
+    if let Err(e) = state.db.execute("DELETE FROM optimize_cache", vec![]).await {
+        warn!("  cache   : L2 clear failed: {e}");
+    }
+    info!("  cache   : cleared (L1 + L2)");
 
     info!("========================");
     Ok("Collection reset successfully")

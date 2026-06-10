@@ -142,27 +142,26 @@ impl Turso {
             if let Some(err) = &result.error {
                 return Err(format!("Turso SQL error: {}", err.message));
             }
-            if result.result_type == "ok" {
-                if let Some(resp) = &result.response {
-                    if let Some(rows_data) = &resp.result {
-                        let col_names: Vec<&str> =
-                            rows_data.cols.iter().map(|c| c.name.as_str()).collect();
+            if result.result_type == "ok"
+                && let Some(resp) = &result.response
+                && let Some(rows_data) = &resp.result
+            {
+                let col_names: Vec<&str> =
+                    rows_data.cols.iter().map(|c| c.name.as_str()).collect();
 
-                        let rows = rows_data
-                            .rows
+                let rows = rows_data
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        col_names
                             .iter()
-                            .map(|row| {
-                                col_names
-                                    .iter()
-                                    .zip(row.iter())
-                                    .map(|(col, val)| (col.to_string(), decode_cell(val)))
-                                    .collect::<HashMap<String, serde_json::Value>>()
-                            })
-                            .collect();
+                            .zip(row.iter())
+                            .map(|(col, val)| (col.to_string(), decode_cell(val)))
+                            .collect::<HashMap<String, serde_json::Value>>()
+                    })
+                    .collect();
 
-                        return Ok(rows);
-                    }
-                }
+                return Ok(rows);
             }
         }
 

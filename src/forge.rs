@@ -146,10 +146,11 @@ fn forge_binary() -> String {
 
 fn extract_sol_contract_name(source: &str) -> Option<String> {
     for line in source.lines() {
-        if let Some(rest) = line.trim().strip_prefix("contract ") {
-            if let Some(name) = rest.split(|c: char| !c.is_alphanumeric() && c != '_').next() {
-                if !name.is_empty() { return Some(name.to_string()); }
-            }
+        if let Some(rest) = line.trim().strip_prefix("contract ")
+            && let Some(name) = rest.split(|c: char| !c.is_alphanumeric() && c != '_').next()
+            && !name.is_empty()
+        {
+            return Some(name.to_string());
         }
     }
     None
@@ -178,10 +179,10 @@ fn clean_for_forge(code: &str) -> String {
             if t.starts_with("**") { return false; }
             if t.starts_with("*(") { return false; }
             // Bullet points that start with an uppercase word are English prose, not Solidity
-            if let Some(rest) = t.strip_prefix("- ") {
-                if rest.trim().chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                    return false;
-                }
+            if let Some(rest) = t.strip_prefix("- ")
+                && rest.trim().chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            {
+                return false;
             }
             true
         })
@@ -203,11 +204,12 @@ fn collect_forge_errors(stderr: &str) -> Vec<String> {
 
 fn parse_test_gas(output: &str, fn_suffix: &str) -> Option<u64> {
     for line in output.lines() {
-        if line.contains(fn_suffix) && line.contains("gas:") {
-            if let Some(g) = line.split("gas:").nth(1) {
-                let s = g.trim().trim_end_matches(')').trim();
-                if let Ok(n) = s.parse::<u64>() { return Some(n); }
-            }
+        if line.contains(fn_suffix)
+            && line.contains("gas:")
+            && let Some(g) = line.split("gas:").nth(1)
+        {
+            let s = g.trim().trim_end_matches(')').trim();
+            if let Ok(n) = s.parse::<u64>() { return Some(n); }
         }
     }
     None
