@@ -56,8 +56,9 @@ fn canon_tokens(src: &str, structural: bool) -> Vec<String> {
     let mut errors = Vec::new();
     let lexer = Lexer::new(src, 0, &mut comments, &mut errors);
 
+    // solang-parser's Lexer yields `(usize, Token, usize)` directly; lexical
+    // errors are collected into `errors`, so there is nothing to unwrap here.
     lexer
-        .filter_map(|spanned| spanned.ok())
         .map(|(_, tok, _)| {
             if !structural {
                 return tok.to_string();
