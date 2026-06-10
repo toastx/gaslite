@@ -80,11 +80,19 @@ pub struct Turso {
 }
 
 impl Turso {
-    pub fn new(http: reqwest::Client, url: String, token: String) -> Self {
+    pub fn new(
+        http: reqwest::Client,
+        url: String,
+        token: String,
+    ) -> Self {
         Self { http, url, token }
     }
 
-    async fn pipeline(&self, sql: &str, args: Vec<TursoArg>) -> Result<TursoResponse, String> {
+    async fn pipeline(
+        &self,
+        sql: &str,
+        args: Vec<TursoArg>,
+    ) -> Result<TursoResponse, String> {
         let stmts = vec![
             TursoStatement {
                 stmt_type: "execute".to_string(),
@@ -101,15 +109,24 @@ impl Turso {
 
         let res = self
             .http
-            .post(format!("{}/v2/pipeline", self.url))
+            .post(format!(
+                "{}/v2/pipeline",
+                self.url
+            ))
             .bearer_auth(&self.token)
             .json(&TursoRequest { requests: stmts })
             .send()
             .await
             .map_err(|e| format!("Turso request failed: {e}"))?;
 
-        if !res.status().is_success() {
-            return Err(format!("Turso returned status {}", res.status()));
+        if !res
+            .status()
+            .is_success()
+        {
+            return Err(format!(
+                "Turso returned status {}",
+                res.status()
+            ));
         }
 
         res.json()
@@ -117,13 +134,22 @@ impl Turso {
             .map_err(|e| format!("Turso parse error: {e}"))
     }
 
-    pub async fn execute(&self, sql: &str, args: Vec<TursoArg>) -> Result<(), String> {
-        let body = self.pipeline(sql, args).await?;
+    pub async fn execute(
+        &self,
+        sql: &str,
+        args: Vec<TursoArg>,
+    ) -> Result<(), String> {
+        let body = self
+            .pipeline(sql, args)
+            .await?;
 
         // check for errors in results
         for result in &body.results {
             if let Some(err) = &result.error {
-                return Err(format!("Turso SQL error: {}", err.message));
+                return Err(format!(
+                    "Turso SQL error: {}",
+                    err.message
+                ));
             }
         }
 
@@ -135,19 +161,30 @@ impl Turso {
         sql: &str,
         args: Vec<TursoArg>,
     ) -> Result<Vec<HashMap<String, serde_json::Value>>, String> {
-        let body = self.pipeline(sql, args).await?;
+        let body = self
+            .pipeline(sql, args)
+            .await?;
 
         // extract rows from first execute result
         for result in &body.results {
             if let Some(err) = &result.error {
-                return Err(format!("Turso SQL error: {}", err.message));
+                return Err(format!(
+                    "Turso SQL error: {}",
+                    err.message
+                ));
             }
             if result.result_type == "ok"
                 && let Some(resp) = &result.response
                 && let Some(rows_data) = &resp.result
             {
-                let col_names: Vec<&str> =
-                    rows_data.cols.iter().map(|c| c.name.as_str()).collect();
+                let col_names: Vec<&str> = rows_data
+                    .cols
+                    .iter()
+                    .map(|c| {
+                        c.name
+                            .as_str()
+                    })
+                    .collect();
 
                 let rows = rows_data
                     .rows
@@ -156,7 +193,12 @@ impl Turso {
                         col_names
                             .iter()
                             .zip(row.iter())
-                            .map(|(col, val)| (col.to_string(), decode_cell(val)))
+                            .map(|(col, val)| {
+                                (
+                                    col.to_string(),
+                                    decode_cell(val),
+                                )
+                            })
                             .collect::<HashMap<String, serde_json::Value>>()
                     })
                     .collect();
@@ -173,7 +215,10 @@ impl Turso {
 /// "blob", "value": ...}`. Flatten it to a plain JSON value so callers can use
 /// `.as_str()` / `.as_i64()`. Cells already in plain form are returned unchanged.
 fn decode_cell(cell: &serde_json::Value) -> serde_json::Value {
-    let Some(ty) = cell.get("type").and_then(|t| t.as_str()) else {
+    let Some(ty) = cell
+        .get("type")
+        .and_then(|t| t.as_str())
+    else {
         return cell.clone();
     };
     let value = cell.get("value");
@@ -182,11 +227,16 @@ fn decode_cell(cell: &serde_json::Value) -> serde_json::Value {
         // Hrana encodes integers as strings to preserve 64-bit precision.
         "integer" => value
             .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<i64>().ok())
+            .and_then(|s| {
+                s.parse::<i64>()
+                    .ok()
+            })
             .map(serde_json::Value::from)
             .or_else(|| value.cloned())
             .unwrap_or(serde_json::Value::Null),
         // text / float / blob → the underlying value.
-        _ => value.cloned().unwrap_or(serde_json::Value::Null),
+        _ => value
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
     }
 }

@@ -7,23 +7,30 @@
 //! a shared `OnceCell`, so the composed search runs **once** per request even
 //! though `dynamic_context` re-fetches on every agent turn.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
-use qdrant_client::qdrant::{Condition, Filter as QFilter, SearchPointsBuilder};
-use qdrant_client::Qdrant;
-use rig_core::embeddings::embedding::EmbeddingModel;
-use rig_core::vector_store::request::{Filter, VectorSearchRequest};
-use rig_core::vector_store::{VectorStoreError, VectorStoreIndex};
+use qdrant_client::{
+    Qdrant,
+    qdrant::{Condition, Filter as QFilter, SearchPointsBuilder},
+};
+use rig_core::{
+    embeddings::embedding::EmbeddingModel,
+    vector_store::{
+        VectorStoreError, VectorStoreIndex,
+        request::{Filter, VectorSearchRequest},
+    },
+};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::OnceCell;
 use tracing::info;
 
-use crate::db::{Turso, TursoArg};
-use crate::embedding::FastembedAdapter;
-use crate::normalize::PatternMatcher;
-use crate::COLLECTION;
+use crate::{
+    COLLECTION,
+    db::{Turso, TursoArg},
+    embedding::FastembedAdapter,
+    normalize::PatternMatcher,
+};
 
 const TOKEN_CATS: [&str; 5] = ["erc20", "erc721", "erc1155", "erc2981", "accounts"];
 
@@ -73,13 +80,21 @@ impl GasliteIndex {
     /// Retrieve (memoised). The composed search runs once; later calls clone the
     /// cached result.
     async fn retrieve(&self) -> Result<Vec<Hit>, VectorStoreError> {
-        let hits = self.cache.get_or_try_init(|| self.compute()).await?;
+        let hits = self
+            .cache
+            .get_or_try_init(|| self.compute())
+            .await?;
         Ok(hits.clone())
     }
 
     /// Pattern ids for the optimize response. Shares the same cache as the agent.
     pub async fn pattern_ids(&self) -> Result<Vec<String>, VectorStoreError> {
-        Ok(self.retrieve().await?.into_iter().map(|(_, id, _)| id).collect())
+        Ok(self
+            .retrieve()
+            .await?
+            .into_iter()
+            .map(|(_, id, _)| id)
+            .collect())
     }
 
     /// The actual composed search: embed the contract, run the
@@ -91,26 +106,39 @@ impl GasliteIndex {
             .embed_text(&self.query)
             .await
             .map_err(VectorStoreError::EmbeddingError)?;
-        let qvec: Vec<f32> = emb.vec.iter().map(|f| *f as f32).collect();
+        let qvec: Vec<f32> = emb
+            .vec
+            .iter()
+            .map(|f| *f as f32)
+            .collect();
 
-        let is_token = self.category.map(|c| TOKEN_CATS.contains(&c)).unwrap_or(false);
+        let is_token = self
+            .category
+            .map(|c| TOKEN_CATS.contains(&c))
+            .unwrap_or(false);
 
-        // 2. Pattern hits: token contracts get category-filtered + 1 general;
-        //    everything else gets a plain top-3.
+        // 2. Pattern hits: token contracts get category-filtered + 1 general; everything else gets
+        //    a plain top-3.
         let pattern_hits = if is_token {
-            let cat = self.category.unwrap();
+            let cat = self
+                .category
+                .unwrap();
             let cat_r = self
                 .qdrant
                 .search_points(
                     SearchPointsBuilder::new(COLLECTION, qvec.clone(), 2)
                         .with_payload(true)
-                        .filter(QFilter::must([Condition::matches(
-                            "category",
-                            cat.to_string(),
-                        )])),
+                        .filter(QFilter::must([
+                            Condition::matches("category", cat.to_string()),
+                        ])),
                 )
                 .await
-                .map_err(|e| VectorStoreError::DatastoreError(e.to_string().into()))?;
+                .map_err(|e| {
+                    VectorStoreError::DatastoreError(
+                        e.to_string()
+                            .into(),
+                    )
+                })?;
 
             let gen_r = self
                 .qdrant
@@ -125,7 +153,12 @@ impl GasliteIndex {
                         )),
                 )
                 .await
-                .map_err(|e| VectorStoreError::DatastoreError(e.to_string().into()))?;
+                .map_err(|e| {
+                    VectorStoreError::DatastoreError(
+                        e.to_string()
+                            .into(),
+                    )
+                })?;
 
             let mut combined = cat_r.result;
             combined.extend(gen_r.result);
@@ -136,7 +169,12 @@ impl GasliteIndex {
                     SearchPointsBuilder::new(COLLECTION, qvec.clone(), 3).with_payload(true),
                 )
                 .await
-                .map_err(|e| VectorStoreError::DatastoreError(e.to_string().into()))?
+                .map_err(|e| {
+                    VectorStoreError::DatastoreError(
+                        e.to_string()
+                            .into(),
+                    )
+                })?
                 .result
         };
 
@@ -144,7 +182,15 @@ impl GasliteIndex {
         let mut seen: HashSet<String> = HashSet::new();
 
         for hit in pattern_hits {
-            let Some(id) = hit.payload.get("pattern_id").map(|v| v.to_string().trim().replace('"', "")) else {
+            let Some(id) = hit
+                .payload
+                .get("pattern_id")
+                .map(|v| {
+                    v.to_string()
+                        .trim()
+                        .replace('"', "")
+                })
+            else {
                 continue;
             };
             if !seen.insert(id.clone()) {
@@ -160,10 +206,20 @@ impl GasliteIndex {
                 .await
                 .map_err(|e| VectorStoreError::DatastoreError(e.into()))?;
             if let Some(row) = rows.first() {
-                let get = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let get = |k: &str| {
+                    row.get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
                 let text = format!(
                     "PATTERN ID: {}\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
-                    id, get("title"), get("explanation"), get("yul_optimized"), get("risk_level"), get("when_not_to_apply"),
+                    id,
+                    get("title"),
+                    get("explanation"),
+                    get("yul_optimized"),
+                    get("risk_level"),
+                    get("when_not_to_apply"),
                 );
                 out.push((hit.score as f64, id, text));
             }
@@ -175,17 +231,32 @@ impl GasliteIndex {
             .search_points(
                 SearchPointsBuilder::new(COLLECTION, qvec, 2)
                     .with_payload(true)
-                    .filter(QFilter::must([Condition::matches(
-                        "type",
-                        "antipattern".to_string(),
-                    )])),
+                    .filter(QFilter::must([
+                        Condition::matches(
+                            "type",
+                            "antipattern".to_string(),
+                        ),
+                    ])),
             )
             .await
-            .map_err(|e| VectorStoreError::DatastoreError(e.to_string().into()))?
+            .map_err(|e| {
+                VectorStoreError::DatastoreError(
+                    e.to_string()
+                        .into(),
+                )
+            })?
             .result;
 
         for hit in anti_hits {
-            let Some(id) = hit.payload.get("pattern_id").map(|v| v.to_string().trim().replace('"', "")) else {
+            let Some(id) = hit
+                .payload
+                .get("pattern_id")
+                .map(|v| {
+                    v.to_string()
+                        .trim()
+                        .replace('"', "")
+                })
+            else {
                 continue;
             };
             if !seen.insert(id.clone()) {
@@ -201,18 +272,29 @@ impl GasliteIndex {
                 .await
                 .map_err(|e| VectorStoreError::DatastoreError(e.into()))?;
             if let Some(row) = rows.first() {
-                let get = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let get = |k: &str| {
+                    row.get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
                 let text = format!(
                     "ANTIPATTERN ID: {}\nTitle: {}\nExplanation: {}\nWrong:\n{}\nCorrect:\n{}",
-                    id, get("title"), get("explanation"), get("solidity_before"), get("yul_optimized"),
+                    id,
+                    get("title"),
+                    get("explanation"),
+                    get("solidity_before"),
+                    get("yul_optimized"),
                 );
                 out.push((hit.score as f64, id, text));
             }
         }
 
-        // 4. Structural ("Seeker") matches — deterministic, name-agnostic. The
-        //    second signal alongside embedding search (GasAgent-style dual retrieval).
-        let struct_ids = self.matcher.match_function(&self.query);
+        // 4. Structural ("Seeker") matches — deterministic, name-agnostic. The second signal
+        //    alongside embedding search (GasAgent-style dual retrieval).
+        let struct_ids = self
+            .matcher
+            .match_function(&self.query);
         let mut struct_added = 0usize;
         for id in &struct_ids {
             if !seen.insert(id.clone()) {
@@ -228,10 +310,20 @@ impl GasliteIndex {
                 .await
                 .map_err(|e| VectorStoreError::DatastoreError(e.into()))?;
             if let Some(row) = rows.first() {
-                let get = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let get = |k: &str| {
+                    row.get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
                 let text = format!(
                     "PATTERN ID: {} (structural match)\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
-                    id, get("title"), get("explanation"), get("yul_optimized"), get("risk_level"), get("when_not_to_apply"),
+                    id,
+                    get("title"),
+                    get("explanation"),
+                    get("yul_optimized"),
+                    get("risk_level"),
+                    get("when_not_to_apply"),
                 );
                 // Deterministic hits get top score.
                 out.push((1.0, id.clone(), text));
@@ -245,7 +337,11 @@ impl GasliteIndex {
             out.len(),
             out.len() - struct_added,
             struct_added,
-            if struct_ids.is_empty() { String::new() } else { format!(" {struct_ids:?}") },
+            if struct_ids.is_empty() {
+                String::new()
+            } else {
+                format!(" {struct_ids:?}")
+            },
         );
 
         Ok(out)

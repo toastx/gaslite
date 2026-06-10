@@ -15,25 +15,24 @@ use db::{Turso, TursoArg};
 use embedding::FastembedAdapter;
 use retrieval::GasliteIndex;
 
-use tracing::{info, warn, error};
 use axum::{
+    Json, Router,
     extract::State,
     routing::{get, post},
-    Json, Router,
 };
-use qdrant_client::{Payload, qdrant::{
-    CreateCollectionBuilder, Distance, PointStruct, UpsertPointsBuilder, VectorParamsBuilder
-}};
-use qdrant_client::qdrant::{CreateFieldIndexCollectionBuilder, FieldType};
-use qdrant_client::Qdrant;
-use rig_core::client::ProviderClient;
-use rig_core::providers::deepseek;
+use qdrant_client::{
+    Payload, Qdrant,
+    qdrant::{
+        CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, Distance, FieldType,
+        PointStruct, UpsertPointsBuilder, VectorParamsBuilder,
+    },
+};
+use rig_core::{client::ProviderClient, providers::deepseek};
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::Path;
-use std::sync::Arc;
-use uuid::Uuid;
 use solang_parser::pt::{ContractPart, Loc, SourceUnitPart};
+use std::{fs, path::Path, sync::Arc};
+use tracing::{error, info, warn};
+use uuid::Uuid;
 
 // ── constants ─────────────────────────────────────────────────────────────────
 pub const COLLECTION: &str = "gaslite_patterns";
@@ -60,7 +59,10 @@ struct AppState {
 }
 
 /// L2 cache read — fetch a stored optimization from Turso by normalized key.
-async fn db_cache_get(db: &Turso, key: &str) -> Option<OptimizeResponse> {
+async fn db_cache_get(
+    db: &Turso,
+    key: &str,
+) -> Option<OptimizeResponse> {
     let rows = db
         .query(
             "SELECT response FROM optimize_cache WHERE cache_key = ?",
@@ -68,12 +70,19 @@ async fn db_cache_get(db: &Turso, key: &str) -> Option<OptimizeResponse> {
         )
         .await
         .ok()?;
-    let json = rows.first()?.get("response")?.as_str()?;
+    let json = rows
+        .first()?
+        .get("response")?
+        .as_str()?;
     serde_json::from_str::<OptimizeResponse>(json).ok()
 }
 
 /// L2 cache write — persist an optimization to Turso (write-through).
-async fn db_cache_put(db: &Turso, key: &str, resp: &OptimizeResponse) -> Result<(), String> {
+async fn db_cache_put(
+    db: &Turso,
+    key: &str,
+    resp: &OptimizeResponse,
+) -> Result<(), String> {
     let json = serde_json::to_string(resp).map_err(|e| e.to_string())?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -105,11 +114,19 @@ async fn load_pattern_matcher(db: &Turso) -> normalize::PatternMatcher {
             return normalize::PatternMatcher::default();
         }
     };
-    let pairs = rows.into_iter().filter_map(|row| {
-        let id = row.get("id")?.as_str()?.to_string();
-        let before = row.get("solidity_before")?.as_str()?.to_string();
-        Some((id, before))
-    });
+    let pairs = rows
+        .into_iter()
+        .filter_map(|row| {
+            let id = row
+                .get("id")?
+                .as_str()?
+                .to_string();
+            let before = row
+                .get("solidity_before")?
+                .as_str()?
+                .to_string();
+            Some((id, before))
+        });
     normalize::PatternMatcher::build(pairs)
 }
 
@@ -144,7 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 
@@ -156,7 +173,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let qdrant_url = std::env::var("QDRANT_CLUSTER_URL").expect("QDRANT_CLUSTER_URL required");
     let turso_url = std::env::var("TURSO_DATABASE_URL").expect("TURSO_DATABASE_URL required");
     let turso_token = std::env::var("TURSO_AUTH_TOKEN").expect("TURSO_AUTH_TOKEN required");
-
 
     let http = reqwest::Client::new();
     let embedder = Embedder::new()?;
@@ -172,11 +188,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Failed to list Qdrant collections");
 
-    if !existing.collections.iter().any(|c| c.name == COLLECTION) {
+    if !existing
+        .collections
+        .iter()
+        .any(|c| c.name == COLLECTION)
+    {
         qdrant
             .create_collection(
-                CreateCollectionBuilder::new(COLLECTION)
-                    .vectors_config(VectorParamsBuilder::new(VECTOR_DIM, Distance::Cosine)),
+                CreateCollectionBuilder::new(COLLECTION).vectors_config(VectorParamsBuilder::new(
+                    VECTOR_DIM,
+                    Distance::Cosine,
+                )),
             )
             .await
             .expect("Failed to create Qdrant collection");
@@ -190,13 +212,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let state = Arc::new(AppState {
-        db: Arc::new(Turso::new(http, turso_url, turso_token)),
+        db: Arc::new(Turso::new(
+            http,
+            turso_url,
+            turso_token,
+        )),
         qdrant: Arc::new(qdrant),
         deepseek,
         embedder,
         forge_available,
         cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        pattern_matcher: std::sync::RwLock::new(Arc::new(normalize::PatternMatcher::default())),
+        pattern_matcher: std::sync::RwLock::new(Arc::new(
+            normalize::PatternMatcher::default(),
+        )),
     });
 
     // run migration via HTTP
@@ -251,23 +279,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if matcher.is_empty() {
             warn!("structural matcher: 0 templates (knowledge base empty — ingest patterns first)");
         } else {
-            info!("structural matcher: {} pattern templates loaded", matcher.len());
+            info!(
+                "structural matcher: {} pattern templates loaded",
+                matcher.len()
+            );
         }
-        *state.pattern_matcher.write().unwrap() = Arc::new(matcher);
+        *state
+            .pattern_matcher
+            .write()
+            .unwrap() = Arc::new(matcher);
     }
 
     let router = Router::new()
         .route("/health", get(health_check))
-        .route("/api/optimize", post(optimize_contract))
-        .route("/api/verify", post(forge::verify_contract))
-        .route("/api/admin/ingest-local", post(ingest_local_files))
-        .route("/api/admin/qdrant/reset", post(reset_collection))
+        .route(
+            "/api/optimize",
+            post(optimize_contract),
+        )
+        .route(
+            "/api/verify",
+            post(forge::verify_contract),
+        )
+        .route(
+            "/api/admin/ingest-local",
+            post(ingest_local_files),
+        )
+        .route(
+            "/api/admin/qdrant/reset",
+            post(reset_collection),
+        )
         .with_state(state);
 
     spawn_pinger();
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await?;
-    info!("Gaslite listening on {}", listener.local_addr()?);
+    info!(
+        "Gaslite listening on {}",
+        listener.local_addr()?
+    );
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -279,7 +328,10 @@ fn spawn_pinger() {
     let url = std::env::var("PING_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
     let interval_secs = std::env::var("PING_INTERVAL_SECS")
         .ok()
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| {
+            v.parse()
+                .ok()
+        })
         .unwrap_or(DEFAULT_INTERVAL_SECS);
 
     tokio::spawn(async move {
@@ -297,12 +349,20 @@ fn spawn_pinger() {
         info!("pinger: targeting {url} every {interval_secs}s");
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         loop {
-            ticker.tick().await;
+            ticker
+                .tick()
+                .await;
             let started = std::time::Instant::now();
-            match client.get(&url).send().await {
+            match client
+                .get(&url)
+                .send()
+                .await
+            {
                 Ok(resp) => {
                     let status = resp.status();
-                    let ms = started.elapsed().as_millis();
+                    let ms = started
+                        .elapsed()
+                        .as_millis();
                     if status.is_success() {
                         info!("pinger: OK {status} in {ms}ms");
                     } else {
@@ -341,27 +401,62 @@ struct HealthResponse {
 }
 
 async fn health_check(
-    State(state): State<Arc<AppState>>,
-) -> (axum::http::StatusCode, Json<HealthResponse>) {
+    State(state): State<Arc<AppState>>
+) -> (
+    axum::http::StatusCode,
+    Json<HealthResponse>,
+) {
     info!("GET /health");
 
     // Turso (structured store) — cheapest possible round-trip.
     let t = std::time::Instant::now();
-    let turso = match state.db.query("SELECT 1", vec![]).await {
-        Ok(_) => ComponentHealth { status: "ok", latency_ms: t.elapsed().as_millis(), error: None },
+    let turso = match state
+        .db
+        .query("SELECT 1", vec![])
+        .await
+    {
+        Ok(_) => ComponentHealth {
+            status: "ok",
+            latency_ms: t
+                .elapsed()
+                .as_millis(),
+            error: None,
+        },
         Err(e) => {
             warn!("health: turso check failed: {e}");
-            ComponentHealth { status: "down", latency_ms: t.elapsed().as_millis(), error: Some(e) }
+            ComponentHealth {
+                status: "down",
+                latency_ms: t
+                    .elapsed()
+                    .as_millis(),
+                error: Some(e),
+            }
         }
     };
 
     // Qdrant (vector store) — listing collections is a lightweight connectivity probe.
     let q = std::time::Instant::now();
-    let qdrant = match state.qdrant.list_collections().await {
-        Ok(_) => ComponentHealth { status: "ok", latency_ms: q.elapsed().as_millis(), error: None },
+    let qdrant = match state
+        .qdrant
+        .list_collections()
+        .await
+    {
+        Ok(_) => ComponentHealth {
+            status: "ok",
+            latency_ms: q
+                .elapsed()
+                .as_millis(),
+            error: None,
+        },
         Err(e) => {
             warn!("health: qdrant check failed: {e}");
-            ComponentHealth { status: "down", latency_ms: q.elapsed().as_millis(), error: Some(e.to_string()) }
+            ComponentHealth {
+                status: "down",
+                latency_ms: q
+                    .elapsed()
+                    .as_millis(),
+                error: Some(e.to_string()),
+            }
         }
     };
 
@@ -384,11 +479,20 @@ async fn health_check(
 }
 
 /// Per-function optimization result: `(start, end, original_fn, optimized, pattern_ids)`.
-type FnOptResult = (usize, usize, String, Result<String, String>, Vec<String>);
+type FnOptResult = (
+    usize,
+    usize,
+    String,
+    Result<String, String>,
+    Vec<String>,
+);
 
 /// Render an optional gas figure for user-facing strings ("n/a" when absent).
 fn fmt_gas(g: Option<u64>) -> String {
-    g.map_or_else(|| "n/a".to_string(), |v| v.to_string())
+    g.map_or_else(
+        || "n/a".to_string(),
+        |v| v.to_string(),
+    )
 }
 
 async fn optimize_contract(
@@ -397,18 +501,34 @@ async fn optimize_contract(
 ) -> Result<Json<OptimizeResponse>, (axum::http::StatusCode, String)> {
     let t0 = std::time::Instant::now();
 
-    // 0. Result cache — keyed on the NORMALIZED source (comments/whitespace
-    //    stripped), so formatting-only differences still hit. L1 = in-memory,
-    //    L2 = Turso (durable across restarts).
+    // 0. Result cache — keyed on the NORMALIZED source (comments/whitespace stripped), so
+    //    formatting-only differences still hit. L1 = in-memory, L2 = Turso (durable across
+    //    restarts).
     let cache_key = normalize::lexical_key(&payload.contract_source);
-    if let Some(hit) = state.cache.lock().unwrap().get(&cache_key).cloned() {
-        info!("optimize: cache HIT (L1 memory) → returned in {:.2?}", t0.elapsed());
+    if let Some(hit) = state
+        .cache
+        .lock()
+        .unwrap()
+        .get(&cache_key)
+        .cloned()
+    {
+        info!(
+            "optimize: cache HIT (L1 memory) → returned in {:.2?}",
+            t0.elapsed()
+        );
         return Ok(Json(hit));
     }
     if let Some(hit) = db_cache_get(&state.db, &cache_key).await {
-        info!("optimize: cache HIT (L2 turso) → returned in {:.2?}", t0.elapsed());
+        info!(
+            "optimize: cache HIT (L2 turso) → returned in {:.2?}",
+            t0.elapsed()
+        );
         // Warm L1 so subsequent hits are instant.
-        state.cache.lock().unwrap().insert(cache_key.clone(), hit.clone());
+        state
+            .cache
+            .lock()
+            .unwrap()
+            .insert(cache_key.clone(), hit.clone());
         return Ok(Json(hit));
     }
 
@@ -418,24 +538,53 @@ async fn optimize_contract(
     let category_str = category.unwrap_or("general");
 
     info!("=== OPTIMIZE REQUEST ===");
-    info!("  contract : {} bytes", payload.contract_source.len());
-    info!("  detected : {}", category_str);
-    info!("  functions: {}", functions.len());
-    info!("  forge    : {}", if state.forge_available { "closed-loop" } else { "one-shot" });
+    info!(
+        "  contract : {} bytes",
+        payload
+            .contract_source
+            .len()
+    );
+    info!(
+        "  detected : {}",
+        category_str
+    );
+    info!(
+        "  functions: {}",
+        functions.len()
+    );
+    info!(
+        "  forge    : {}",
+        if state.forge_available {
+            "closed-loop"
+        } else {
+            "one-shot"
+        }
+    );
     info!("========================");
 
     if functions.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST,
-            "No optimizable functions found — ensure the contract parses correctly".to_string()));
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "No optimizable functions found — ensure the contract parses correctly".to_string(),
+        ));
     }
 
-    // 2. Optimize every function concurrently — one rig agent per function,
-    //    bounded by a semaphore. Each agent does its own retrieval and (when
-    //    forge is available) its own compile loop against the original contract.
-    info!("=== OPTIMIZING {} FUNCTIONS CONCURRENTLY ===", functions.len());
-    let original: Arc<str> = Arc::from(payload.contract_source.as_str());
+    // 2. Optimize every function concurrently — one rig agent per function, bounded by a semaphore.
+    //    Each agent does its own retrieval and (when forge is available) its own compile loop
+    //    against the original contract.
+    info!(
+        "=== OPTIMIZING {} FUNCTIONS CONCURRENTLY ===",
+        functions.len()
+    );
+    let original: Arc<str> = Arc::from(
+        payload
+            .contract_source
+            .as_str(),
+    );
     let storage: Arc<str> = Arc::from(storage_layout.as_str());
-    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_FUNCS));
+    let sem = Arc::new(tokio::sync::Semaphore::new(
+        MAX_PARALLEL_FUNCS,
+    ));
 
     let mut set: tokio::task::JoinSet<FnOptResult> = tokio::task::JoinSet::new();
     for func in functions {
@@ -443,26 +592,71 @@ async fn optimize_contract(
         let permit_sem = sem.clone();
         let original = original.clone();
         let storage = storage.clone();
-        let FunctionInfo { name, source: fsrc, start, end } = func;
+        let FunctionInfo {
+            name,
+            source: fsrc,
+            start,
+            end,
+        } = func;
         set.spawn(async move {
-            let _permit = permit_sem.acquire().await.expect("semaphore closed");
-            let adapter = FastembedAdapter::new(state.embedder.clone());
-            let matcher = state.pattern_matcher.read().unwrap().clone();
-            let index = GasliteIndex::new(
-                state.qdrant.clone(), state.db.clone(), adapter, category,
-                fsrc.clone(), matcher, name.clone(),
+            let _permit = permit_sem
+                .acquire()
+                .await
+                .expect("semaphore closed");
+            let adapter = FastembedAdapter::new(
+                state
+                    .embedder
+                    .clone(),
             );
-            let pattern_ids = index.pattern_ids().await.unwrap_or_default();
+            let matcher = state
+                .pattern_matcher
+                .read()
+                .unwrap()
+                .clone();
+            let index = GasliteIndex::new(
+                state
+                    .qdrant
+                    .clone(),
+                state
+                    .db
+                    .clone(),
+                adapter,
+                category,
+                fsrc.clone(),
+                matcher,
+                name.clone(),
+            );
+            let pattern_ids = index
+                .pattern_ids()
+                .await
+                .unwrap_or_default();
             let optimized = rig_agent::optimize_function(
-                &state.deepseek, index, &storage, original.clone(),
-                &name, &fsrc, start, end, state.forge_available,
-            ).await;
-            (start, end, fsrc, optimized, pattern_ids)
+                &state.deepseek,
+                index,
+                &storage,
+                original.clone(),
+                &name,
+                &fsrc,
+                start,
+                end,
+                state.forge_available,
+            )
+            .await;
+            (
+                start,
+                end,
+                fsrc,
+                optimized,
+                pattern_ids,
+            )
         });
     }
 
     let mut results = Vec::new();
-    while let Some(joined) = set.join_next().await {
+    while let Some(joined) = set
+        .join_next()
+        .await
+    {
         match joined {
             Ok(tuple) => results.push(tuple),
             Err(e) => warn!("  ! function task panicked: {e}"),
@@ -470,14 +664,22 @@ async fn optimize_contract(
     }
     let t_agent = std::time::Instant::now();
 
-    // 3. Splice optimized functions back (descending start keeps offsets valid),
-    //    and aggregate pattern ids for the response.
-    results.sort_by(|a, b| b.0.cmp(&a.0));
-    let mut optimized_code = payload.contract_source.clone();
+    // 3. Splice optimized functions back (descending start keeps offsets valid), and aggregate
+    //    pattern ids for the response.
+    results.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+    });
+    let mut optimized_code = payload
+        .contract_source
+        .clone();
     let mut optimized_count = 0usize;
     let mut all_patterns: Vec<String> = Vec::new();
     for (start, end, fsrc, optimized, pattern_ids) in &results {
-        all_patterns.extend(pattern_ids.iter().cloned());
+        all_patterns.extend(
+            pattern_ids
+                .iter()
+                .cloned(),
+        );
         match optimized {
             Ok(opt) => {
                 let opt = utils::strip_code_fences(opt);
@@ -492,58 +694,97 @@ async fn optimize_contract(
     all_patterns.sort();
     all_patterns.dedup();
     let suggested_patterns = all_patterns;
-    info!("  functions optimized: {}/{}", optimized_count, results.len());
+    info!(
+        "  functions optimized: {}/{}",
+        optimized_count,
+        results.len()
+    );
 
-    // 4. Final authoritative forge check. We only return the rewrite when it
-    //    compiles AND demonstrably saves construction gas; otherwise we keep the
-    //    original. Note this proves "compiles + cheaper constructor", NOT
-    //    behavioural equivalence — the sandbox does not test runtime semantics.
+    // 4. Final authoritative forge check. We only return the rewrite when it compiles AND
+    //    demonstrably saves construction gas; otherwise we keep the original. Note this proves
+    //    "compiles + cheaper constructor", NOT behavioural equivalence — the sandbox does not test
+    //    runtime semantics.
     let analysis: String;
     // Whether the result is worth caching: a real optimization or a clean
     // one-shot. Transient failures (compile error, regression, forge error) are
     // NOT cached, so an identical request can be retried.
     let cacheable: bool;
     if state.forge_available {
-        match forge::run_forge_sandbox_async(payload.contract_source.clone(), optimized_code.clone()).await {
+        match forge::run_forge_sandbox_async(
+            payload
+                .contract_source
+                .clone(),
+            optimized_code.clone(),
+        )
+        .await
+        {
             // Accept only on a proven gas improvement.
-            Ok(vr) if vr.compiles && vr.gas_saved.unwrap_or(0) > 0 => {
-                let saved = vr.gas_saved.unwrap_or(0);
+            Ok(vr)
+                if vr.compiles
+                    && vr
+                        .gas_saved
+                        .unwrap_or(0)
+                        > 0 =>
+            {
+                let saved = vr
+                    .gas_saved
+                    .unwrap_or(0);
                 info!(
                     "  forge accepted: original={} optimized={} saved={}",
-                    fmt_gas(vr.gas_original), fmt_gas(vr.gas_optimized), saved
+                    fmt_gas(vr.gas_original),
+                    fmt_gas(vr.gas_optimized),
+                    saved
                 );
                 analysis = format!(
                     "Compiled on a Mantle fork; construction gas {} → {} (saved {}). \
                      Behavioural equivalence is not tested.",
-                    fmt_gas(vr.gas_original), fmt_gas(vr.gas_optimized), saved
+                    fmt_gas(vr.gas_original),
+                    fmt_gas(vr.gas_optimized),
+                    saved
                 );
                 cacheable = true;
             }
             // Compiles but no proven improvement (regression, zero, or unmeasured) → keep original.
             Ok(vr) if vr.compiles => {
-                warn!("  forge: no proven gas improvement (saved={:?}) — keeping original", vr.gas_saved);
-                optimized_code = payload.contract_source.clone();
+                warn!(
+                    "  forge: no proven gas improvement (saved={:?}) — keeping original",
+                    vr.gas_saved
+                );
+                optimized_code = payload
+                    .contract_source
+                    .clone();
                 analysis = match vr.gas_saved {
-                    Some(s) => format!("Rewrite rejected — no gas improvement (construction gas saved {s}). Kept original."),
-                    None => "Rewrite rejected — construction gas could not be measured. Kept original.".to_string(),
+                    Some(s) => format!(
+                        "Rewrite rejected — no gas improvement (construction gas saved {s}). Kept original."
+                    ),
+                    None => {
+                        "Rewrite rejected — construction gas could not be measured. Kept original."
+                            .to_string()
+                    }
                 };
                 cacheable = false;
             }
             // Did not compile → keep original.
             Ok(vr) => {
                 warn!("  forge: optimized did not compile — keeping original");
-                optimized_code = payload.contract_source.clone();
+                optimized_code = payload
+                    .contract_source
+                    .clone();
                 analysis = format!(
                     "Rewrite rejected — did not compile. Kept original. Errors: {}",
-                    vr.errors.join("; ")
+                    vr.errors
+                        .join("; ")
                 );
                 cacheable = false;
             }
             // Forge errored, timed out, or panicked — can't verify, so don't ship it.
             Err(e) => {
                 warn!("  forge check failed: {e} — keeping original (could not verify)");
-                optimized_code = payload.contract_source.clone();
-                analysis = format!("Rewrite rejected — could not verify (forge: {e}). Kept original.");
+                optimized_code = payload
+                    .contract_source
+                    .clone();
+                analysis =
+                    format!("Rewrite rejected — could not verify (forge: {e}). Kept original.");
                 cacheable = false;
             }
         }
@@ -554,7 +795,10 @@ async fn optimize_contract(
     let t_verify = std::time::Instant::now();
 
     info!("=== OPTIMIZE COMPLETE ===");
-    info!("  patterns : {}", suggested_patterns.len());
+    info!(
+        "  patterns : {}",
+        suggested_patterns.len()
+    );
     info!("  cached   : {}", cacheable);
     info!(
         "  timing   : parse {:.2?} | functions {:.2?} | final-verify {:.2?}",
@@ -562,7 +806,10 @@ async fn optimize_contract(
         t_agent - t_parse,
         t_verify - t_agent,
     );
-    info!("  total    : {:.2?}", t0.elapsed());
+    info!(
+        "  total    : {:.2?}",
+        t0.elapsed()
+    );
     info!("=========================");
 
     let response = OptimizeResponse {
@@ -574,20 +821,29 @@ async fn optimize_contract(
     if cacheable {
         // L1: in-memory, bounded so a flood of distinct inputs can't grow it.
         {
-            let mut cache = state.cache.lock().unwrap();
+            let mut cache = state
+                .cache
+                .lock()
+                .unwrap();
             if cache.len() < 1024 {
-                cache.insert(cache_key.clone(), response.clone());
+                cache.insert(
+                    cache_key.clone(),
+                    response.clone(),
+                );
             }
         }
         // L2: Turso (durable). Best-effort — a write failure doesn't fail the request.
-        if let Err(e) = db_cache_put(&state.db, &cache_key, &response).await {
+        if let Err(e) = db_cache_put(
+            &state.db, &cache_key, &response,
+        )
+        .await
+        {
             warn!("cache: L2 turso write failed: {e}");
         }
     }
 
     Ok(Json(response))
 }
-
 
 // ── Contract analysis: category + per-function extraction + storage layout ──
 // Each named function (with a body) is extracted with its exact source text and
@@ -600,9 +856,19 @@ struct FunctionInfo {
     end: usize,
 }
 
-fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, String) {
+fn analyze_contract(
+    source: &str
+) -> (
+    Option<&'static str>,
+    Vec<FunctionInfo>,
+    String,
+) {
     let Ok((su, _)) = solang_parser::parse(source, 0) else {
-        return (detect_category_fallback(source), vec![], String::new());
+        return (
+            detect_category_fallback(source),
+            vec![],
+            String::new(),
+        );
     };
 
     let mut category: Option<&'static str> = None;
@@ -610,17 +876,27 @@ fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, S
     let mut storage_vars: Vec<String> = Vec::new();
 
     for part in su.0 {
-        let SourceUnitPart::ContractDefinition(def) = part else { continue };
+        let SourceUnitPart::ContractDefinition(def) = part else {
+            continue;
+        };
 
         // Inheritance → category
         for base in &def.base {
-            let base_name = base.name.identifiers.iter()
-                .map(|id| id.name.to_lowercase()).collect::<Vec<_>>().join(".");
+            let base_name = base
+                .name
+                .identifiers
+                .iter()
+                .map(|id| {
+                    id.name
+                        .to_lowercase()
+                })
+                .collect::<Vec<_>>()
+                .join(".");
             if category.is_none() {
                 category = match base_name.as_str() {
-                    s if s.contains("erc721")  => Some("erc721"),
+                    s if s.contains("erc721") => Some("erc721"),
                     s if s.contains("erc1155") => Some("erc1155"),
-                    s if s.contains("erc20")   => Some("erc20"),
+                    s if s.contains("erc20") => Some("erc20"),
                     s if s.contains("erc2981") => Some("erc2981"),
                     _ => None,
                 };
@@ -633,18 +909,29 @@ fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, S
                     if let Loc::File(_, start, end) = var.loc
                         && let Some(text) = source.get(start..end)
                     {
-                        storage_vars.push(text.trim().to_string());
+                        storage_vars.push(
+                            text.trim()
+                                .to_string(),
+                        );
                     }
                 }
                 ContractPart::FunctionDefinition(func) => {
                     // Extract only named functions with a body (skip constructor/
                     // fallback/receive and abstract declarations).
-                    let Some(name_ident) = &func.name else { continue };
+                    let Some(name_ident) = &func.name else {
+                        continue;
+                    };
                     let Some(_) = &func.body else { continue };
-                    let Loc::File(_, start, end) = func.loc else { continue };
-                    let Some(func_text) = source.get(start..end) else { continue };
+                    let Loc::File(_, start, end) = func.loc else {
+                        continue;
+                    };
+                    let Some(func_text) = source.get(start..end) else {
+                        continue;
+                    };
                     functions.push(FunctionInfo {
-                        name: name_ident.name.clone(),
+                        name: name_ident
+                            .name
+                            .clone(),
                         source: func_text.to_string(),
                         start,
                         end,
@@ -655,23 +942,40 @@ fn analyze_contract(source: &str) -> (Option<&'static str>, Vec<FunctionInfo>, S
         }
     }
 
-    (category, functions, storage_vars.join("\n"))
+    (
+        category,
+        functions,
+        storage_vars.join("\n"),
+    )
 }
 
 fn detect_category_fallback(source: &str) -> Option<&'static str> {
     let s = source.to_lowercase();
-    if s.contains("is erc721") || s.contains(": erc721")  { return Some("erc721"); }
-    if s.contains("is erc1155") || s.contains(": erc1155") { return Some("erc1155"); }
-    if s.contains("is erc2981") || s.contains(": erc2981") { return Some("erc2981"); }
-    if s.contains("is erc20") || s.contains(": erc20")    { return Some("erc20"); }
+    if s.contains("is erc721") || s.contains(": erc721") {
+        return Some("erc721");
+    }
+    if s.contains("is erc1155") || s.contains(": erc1155") {
+        return Some("erc1155");
+    }
+    if s.contains("is erc2981") || s.contains(": erc2981") {
+        return Some("erc2981");
+    }
+    if s.contains("is erc20") || s.contains(": erc20") {
+        return Some("erc20");
+    }
     None
 }
 
 async fn create_qdrant_indexes(state: &AppState) -> Result<(), String> {
     for field in ["category", "type"] {
-        state.qdrant
+        state
+            .qdrant
             .create_field_index(
-                CreateFieldIndexCollectionBuilder::new(COLLECTION, field, FieldType::Keyword)
+                CreateFieldIndexCollectionBuilder::new(
+                    COLLECTION,
+                    field,
+                    FieldType::Keyword,
+                ),
             )
             .await
             .map_err(|e| format!("Failed to create Qdrant index on '{field}': {e}"))?;
@@ -681,31 +985,65 @@ async fn create_qdrant_indexes(state: &AppState) -> Result<(), String> {
 }
 
 async fn reset_collection(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
     info!("=== RESET COLLECTION ===");
 
-    state.qdrant
+    state
+        .qdrant
         .delete_collection(COLLECTION)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_string(),
+            )
+        })?;
     info!("  deleted : {}", COLLECTION);
 
-    state.qdrant
+    state
+        .qdrant
         .create_collection(
-            CreateCollectionBuilder::new(COLLECTION)
-                .vectors_config(VectorParamsBuilder::new(VECTOR_DIM, Distance::Cosine)),
+            CreateCollectionBuilder::new(COLLECTION).vectors_config(VectorParamsBuilder::new(
+                VECTOR_DIM,
+                Distance::Cosine,
+            )),
         )
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    info!("  created : {} ({} dims, cosine)", COLLECTION, VECTOR_DIM);
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_string(),
+            )
+        })?;
+    info!(
+        "  created : {} ({} dims, cosine)",
+        COLLECTION, VECTOR_DIM
+    );
 
-    create_qdrant_indexes(&state).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    create_qdrant_indexes(&state)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                e,
+            )
+        })?;
 
     // The knowledge base changed — cached optimizations are now stale (L1 + L2).
-    state.cache.lock().unwrap().clear();
-    if let Err(e) = state.db.execute("DELETE FROM optimize_cache", vec![]).await {
+    state
+        .cache
+        .lock()
+        .unwrap()
+        .clear();
+    if let Err(e) = state
+        .db
+        .execute(
+            "DELETE FROM optimize_cache",
+            vec![],
+        )
+        .await
+    {
         warn!("  cache   : L2 clear failed: {e}");
     }
     info!("  cache   : cleared (L1 + L2)");
@@ -722,14 +1060,25 @@ async fn ingest_local_files(
     let mut failed = Vec::new();
 
     info!("=== INGEST START ===");
-    info!("  directories: {}", payload.directory_paths.len());
+    info!(
+        "  directories: {}",
+        payload
+            .directory_paths
+            .len()
+    );
 
     for dir_path in payload.directory_paths {
         let dir = Path::new(&dir_path);
 
         if !dir.is_dir() {
-            warn!("  ! Not a directory: {}", dir_path);
-            failed.push((dir_path, "Not a valid directory".to_string()));
+            warn!(
+                "  ! Not a directory: {}",
+                dir_path
+            );
+            failed.push((
+                dir_path,
+                "Not a valid directory".to_string(),
+            ));
             continue;
         }
 
@@ -738,75 +1087,138 @@ async fn ingest_local_files(
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
-                error!("  ! Cannot read directory {}: {}", dir_path, e);
-                failed.push((dir_path, format!("Cannot read directory: {e}")));
+                error!(
+                    "  ! Cannot read directory {}: {}",
+                    dir_path, e
+                );
+                failed.push((
+                    dir_path,
+                    format!("Cannot read directory: {e}"),
+                ));
                 continue;
             }
         };
 
         for entry in entries.flatten() {
             let file_path = entry.path();
-            if file_path.extension().and_then(|s| s.to_str()) != Some("json") {
+            if file_path
+                .extension()
+                .and_then(|s| s.to_str())
+                != Some("json")
+            {
                 continue;
             }
 
-            let file_name = file_path.file_name().unwrap().to_string_lossy().into_owned();
+            let file_name = file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
 
             let content = match fs::read_to_string(&file_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!("    ! read error {}: {}", file_name, e);
-                    failed.push((file_name, format!("Read error: {e}"))); continue;
+                    warn!(
+                        "    ! read error {}: {}",
+                        file_name, e
+                    );
+                    failed.push((
+                        file_name,
+                        format!("Read error: {e}"),
+                    ));
+                    continue;
                 }
             };
 
             let meta: serde_json::Value = match serde_json::from_str(&content) {
                 Ok(v) => v,
                 Err(e) => {
-                    warn!("    ! invalid JSON {}: {}", file_name, e);
-                    failed.push((file_name, format!("Invalid JSON: {e}"))); continue;
+                    warn!(
+                        "    ! invalid JSON {}: {}",
+                        file_name, e
+                    );
+                    failed.push((
+                        file_name,
+                        format!("Invalid JSON: {e}"),
+                    ));
+                    continue;
                 }
             };
 
             // Use clean let-else syntax for the critical ID extraction
-            let Some(id) = meta["id"].as_str().map(String::from) else {
-                failed.push((file_name, "Missing 'id' field".to_string()));
+            let Some(id) = meta["id"]
+                .as_str()
+                .map(String::from)
+            else {
+                failed.push((
+                    file_name,
+                    "Missing 'id' field".to_string(),
+                ));
                 continue;
             };
 
             // Extract core fields exactly once to clean up database injection
-            let title = meta["title"].as_str().unwrap_or("title");
-            let category = meta["category"].as_str().unwrap_or("general");
+            let title = meta["title"]
+                .as_str()
+                .unwrap_or("title");
+            let category = meta["category"]
+                .as_str()
+                .unwrap_or("general");
             let triggers = meta["trigger_patterns"].to_string();
-            let sol_before = meta["solidity_before"].as_str()
+            let sol_before = meta["solidity_before"]
+                .as_str()
                 .or(meta["pattern_before"].as_str())
                 .or(meta["wrong_code"].as_str())
                 .unwrap_or("");
 
-            let entry_type = meta["type"].as_str().unwrap_or("pattern");
+            let entry_type = meta["type"]
+                .as_str()
+                .unwrap_or("pattern");
 
             let embed_text = if entry_type == "antipattern" {
-                let wrong = meta["wrong_code"].as_str().unwrap_or("");
-                let why = meta["why_wrong"].as_str().unwrap_or("");
+                let wrong = meta["wrong_code"]
+                    .as_str()
+                    .unwrap_or("");
+                let why = meta["why_wrong"]
+                    .as_str()
+                    .unwrap_or("");
                 format!(
                     "TOKEN_STANDARD_NAMESPACE: {}\n\
                     // Antipattern to avoid: {}\n\
                     // Triggers: {}\n\
                     // Wrong code: {}\n\
                     // Why wrong: {}",
-                    category.to_uppercase(), title, triggers, wrong, why
+                    category.to_uppercase(),
+                    title,
+                    triggers,
+                    wrong,
+                    why
                 )
             } else {
                 // existing pattern embed text
                 format!(
                     "TOKEN_STANDARD_NAMESPACE: {}\n// Optimization: {}\n// Keywords: {}\n{}",
-                    category.to_uppercase(), title, triggers, sol_before
+                    category.to_uppercase(),
+                    title,
+                    triggers,
+                    sol_before
                 )
             };
 
-            let vector = match state.embedder.clone().embed(&embed_text).await {
+            let vector = match state
+                .embedder
+                .clone()
+                .embed(&embed_text)
+                .await
+            {
                 Ok(v) => v,
-                Err(e) => { failed.push((id, format!("Embedding error: {e}"))); continue; }
+                Err(e) => {
+                    failed.push((
+                        id,
+                        format!("Embedding error: {e}"),
+                    ));
+                    continue;
+                }
             };
 
             // Turso SQL Insert
@@ -819,25 +1231,79 @@ async fn ingest_local_files(
             let args = vec![
                 TursoArg::Text(id.clone()),
                 TursoArg::Text(category.to_string()),
-                TursoArg::Text(meta["version"].as_str().unwrap_or("1.0").to_string()),
+                TursoArg::Text(
+                    meta["version"]
+                        .as_str()
+                        .unwrap_or("1.0")
+                        .to_string(),
+                ),
                 TursoArg::Text(title.to_string()),
-                TursoArg::Text(meta["source"].as_str().unwrap_or("").to_string()),
-                TursoArg::Text(meta["source_file"].as_str().unwrap_or("").to_string()),
-                TursoArg::Text(meta["difficulty"].as_str().unwrap_or("medium").to_string()),
-                TursoArg::Integer((meta["mantle_specific"].as_bool().unwrap_or(false) as i64).to_string()),
-                TursoArg::Text(meta["evm_version"].as_str().unwrap_or("paris").to_string()),
+                TursoArg::Text(
+                    meta["source"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+                TursoArg::Text(
+                    meta["source_file"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+                TursoArg::Text(
+                    meta["difficulty"]
+                        .as_str()
+                        .unwrap_or("medium")
+                        .to_string(),
+                ),
+                TursoArg::Integer(
+                    (meta["mantle_specific"]
+                        .as_bool()
+                        .unwrap_or(false) as i64)
+                        .to_string(),
+                ),
+                TursoArg::Text(
+                    meta["evm_version"]
+                        .as_str()
+                        .unwrap_or("paris")
+                        .to_string(),
+                ),
                 TursoArg::Text(triggers),
                 TursoArg::Text(sol_before.to_string()),
-                TursoArg::Text(meta["yul_optimized"].as_str().or(meta["pattern_after"].as_str()).or(meta["correct_code"].as_str()).unwrap_or("").to_string()),
+                TursoArg::Text(
+                    meta["yul_optimized"]
+                        .as_str()
+                        .or(meta["pattern_after"].as_str())
+                        .or(meta["correct_code"].as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ),
                 TursoArg::Text(meta["patterns_used"].to_string()),
                 TursoArg::Text(meta["explanation"].to_string()),
-                TursoArg::Text(meta["risk_level"].as_str().unwrap_or("low").to_string()),
+                TursoArg::Text(
+                    meta["risk_level"]
+                        .as_str()
+                        .unwrap_or("low")
+                        .to_string(),
+                ),
                 TursoArg::Text(meta["when_to_apply"].to_string()),
-                TursoArg::Text(meta["when_not_to_apply"].as_str().unwrap_or("").to_string()),
+                TursoArg::Text(
+                    meta["when_not_to_apply"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                ),
             ];
 
-            if let Err(e) = state.db.execute(sql, args).await {
-                failed.push((id, format!("Turso error: {e}")));
+            if let Err(e) = state
+                .db
+                .execute(sql, args)
+                .await
+            {
+                failed.push((
+                    id,
+                    format!("Turso error: {e}"),
+                ));
                 continue;
             }
 
@@ -850,21 +1316,44 @@ async fn ingest_local_files(
             .try_into()
             .expect("Failed to parse JSON into Qdrant Payload");
 
-            let point = PointStruct::new(Uuid::new_v4().to_string(), vector, qdrant_payload);
+            let point = PointStruct::new(
+                Uuid::new_v4().to_string(),
+                vector,
+                qdrant_payload,
+            );
 
-            if let Err(e) = state.qdrant.upsert_points(UpsertPointsBuilder::new(COLLECTION, vec![point])).await {
-                warn!("    ! Qdrant upsert failed {}: {}", id, e);
-                failed.push((id, format!("Qdrant error: {e}")));
+            if let Err(e) = state
+                .qdrant
+                .upsert_points(UpsertPointsBuilder::new(
+                    COLLECTION,
+                    vec![point],
+                ))
+                .await
+            {
+                warn!(
+                    "    ! Qdrant upsert failed {}: {}",
+                    id, e
+                );
+                failed.push((
+                    id,
+                    format!("Qdrant error: {e}"),
+                ));
                 continue;
             }
 
-            info!("    + {} ({}, {})", id, category, entry_type);
+            info!(
+                "    + {} ({}, {})",
+                id, category, entry_type
+            );
             successful.push(id);
         }
     }
 
     info!("=== INGEST COMPLETE ===");
-    info!("  ok     : {}", successful.len());
+    info!(
+        "  ok     : {}",
+        successful.len()
+    );
     info!("  failed : {}", failed.len());
     for (id, reason) in &failed {
         warn!("    ! {} — {}", id, reason);
@@ -874,9 +1363,18 @@ async fn ingest_local_files(
     // Refresh the structural matcher with the newly ingested patterns.
     {
         let matcher = load_pattern_matcher(&state.db).await;
-        info!("  structural matcher: {} templates (rebuilt)", matcher.len());
-        *state.pattern_matcher.write().unwrap() = Arc::new(matcher);
+        info!(
+            "  structural matcher: {} templates (rebuilt)",
+            matcher.len()
+        );
+        *state
+            .pattern_matcher
+            .write()
+            .unwrap() = Arc::new(matcher);
     }
 
-    Ok(Json(IngestLocalResponse { successful_patterns: successful, failed_patterns: failed }))
+    Ok(Json(IngestLocalResponse {
+        successful_patterns: successful,
+        failed_patterns: failed,
+    }))
 }

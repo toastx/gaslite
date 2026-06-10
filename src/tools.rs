@@ -6,13 +6,11 @@
 
 use std::sync::Arc;
 
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
+use rig_core::{completion::ToolDefinition, tool::Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::forge::run_forge_sandbox_async;
-use crate::utils::strip_code_fences;
+use crate::{forge::run_forge_sandbox_async, utils::strip_code_fences};
 
 #[derive(Deserialize)]
 pub struct FnForgeArgs {
@@ -49,8 +47,16 @@ pub struct FunctionForgeTool {
 }
 
 impl FunctionForgeTool {
-    pub fn new(original: Arc<str>, start: usize, end: usize) -> Self {
-        Self { original, start, end }
+    pub fn new(
+        original: Arc<str>,
+        start: usize,
+        end: usize,
+    ) -> Self {
+        Self {
+            original,
+            start,
+            end,
+        }
     }
 }
 
@@ -61,7 +67,10 @@ impl Tool for FunctionForgeTool {
     type Args = FnForgeArgs;
     type Output = ForgeResult;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    async fn definition(
+        &self,
+        _prompt: String,
+    ) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Compile-check your optimized function. Pass ONLY the complete optimized \
@@ -83,23 +92,44 @@ impl Tool for FunctionForgeTool {
         }
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let optimized_fn = strip_code_fences(&args.optimized_function);
 
         // Splice the candidate function into the original contract.
-        let mut spliced = self.original.to_string();
+        let mut spliced = self
+            .original
+            .to_string();
         if self.end <= spliced.len() {
-            spliced.replace_range(self.start..self.end, &optimized_fn);
+            spliced.replace_range(
+                self.start..self.end,
+                &optimized_fn,
+            );
         } else {
-            return Err(ForgeError("function byte range out of bounds".to_string()));
+            return Err(ForgeError(
+                "function byte range out of bounds".to_string(),
+            ));
         }
 
-        let res = run_forge_sandbox_async(self.original.to_string(), spliced)
-            .await
-            .map_err(ForgeError)?;
+        let res = run_forge_sandbox_async(
+            self.original
+                .to_string(),
+            spliced,
+        )
+        .await
+        .map_err(ForgeError)?;
 
-        let gas_measured = res.compiles && res.gas_optimized.is_some();
-        let forge_excerpt: String = res.forge_output.chars().take(2000).collect();
+        let gas_measured = res.compiles
+            && res
+                .gas_optimized
+                .is_some();
+        let forge_excerpt: String = res
+            .forge_output
+            .chars()
+            .take(2000)
+            .collect();
 
         Ok(ForgeResult {
             compiles: res.compiles,

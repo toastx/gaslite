@@ -4,20 +4,22 @@
 //! a Mantle fork → on compile failure or gas regression, refine and retry,
 //! capped by `max_turns`.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
-use rig_core::agent::{HookAction, PromptHook, ToolCallHookAction};
-use rig_core::client::CompletionClient;
-use rig_core::completion::{CompletionModel, CompletionResponse, Prompt};
-use rig_core::message::Message;
-use rig_core::providers::deepseek;
-use rig_core::tool::Tool;
+use rig_core::{
+    agent::{HookAction, PromptHook, ToolCallHookAction},
+    client::CompletionClient,
+    completion::{CompletionModel, CompletionResponse, Prompt},
+    message::Message,
+    providers::deepseek,
+    tool::Tool,
+};
 use tracing::info;
 
-use crate::retrieval::GasliteIndex;
-use crate::tools::FunctionForgeTool;
-use crate::utils::strip_code_fences;
+use crate::{retrieval::GasliteIndex, tools::FunctionForgeTool, utils::strip_code_fences};
 
 /// Max agent turns when the forge loop is active (1 generate + refinements).
 const FORGE_MAX_TURNS: usize = 4;
@@ -124,14 +126,21 @@ pub async fn optimize_function(
     let hook = TimingHook::new(fn_name);
     let result = if use_forge {
         builder
-            .tool(FunctionForgeTool::new(original, fn_start, fn_end))
+            .tool(FunctionForgeTool::new(
+                original, fn_start, fn_end,
+            ))
             .build()
             .prompt(user)
             .with_hook(hook.clone())
             .max_turns(FORGE_MAX_TURNS)
             .await
     } else {
-        builder.build().prompt(user).with_hook(hook.clone()).max_turns(1).await
+        builder
+            .build()
+            .prompt(user)
+            .with_hook(hook.clone())
+            .max_turns(1)
+            .await
     };
 
     let captured = hook.captured();
@@ -142,7 +151,11 @@ pub async fn optimize_function(
         turns,
         llm_total,
         tool_total,
-        if captured.is_some() { " | early-exit" } else { "" }
+        if captured.is_some() {
+            " | early-exit"
+        } else {
+            ""
+        }
     );
 
     // When the forge loop verified a compiling candidate, the hook captured it
@@ -181,26 +194,45 @@ impl TimingHook {
     fn new(label: &str) -> Self {
         Self {
             label: Arc::from(label),
-            state: Arc::new(Mutex::new(TurnTimer::default())),
+            state: Arc::new(Mutex::new(
+                TurnTimer::default(),
+            )),
             captured: Arc::new(Mutex::new(None)),
         }
     }
 
     /// `(turns, total LLM time, total in-loop tool time)`.
     fn summary(&self) -> (usize, Duration, Duration) {
-        let s = self.state.lock().unwrap();
-        (s.turn, s.llm_total, s.tool_total)
+        let s = self
+            .state
+            .lock()
+            .unwrap();
+        (
+            s.turn,
+            s.llm_total,
+            s.tool_total,
+        )
     }
 
     /// The verified candidate captured on early exit, if any.
     fn captured(&self) -> Option<String> {
-        self.captured.lock().unwrap().clone()
+        self.captured
+            .lock()
+            .unwrap()
+            .clone()
     }
 }
 
 impl<M: CompletionModel> PromptHook<M> for TimingHook {
-    async fn on_completion_call(&self, _prompt: &Message, _history: &[Message]) -> HookAction {
-        let mut s = self.state.lock().unwrap();
+    async fn on_completion_call(
+        &self,
+        _prompt: &Message,
+        _history: &[Message],
+    ) -> HookAction {
+        let mut s = self
+            .state
+            .lock()
+            .unwrap();
         s.turn += 1;
         s.llm_start = Some(Instant::now());
         HookAction::cont()
@@ -211,13 +243,22 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         _prompt: &Message,
         _response: &CompletionResponse<M::Response>,
     ) -> HookAction {
-        let mut s = self.state.lock().unwrap();
-        if let Some(start) = s.llm_start.take() {
+        let mut s = self
+            .state
+            .lock()
+            .unwrap();
+        if let Some(start) = s
+            .llm_start
+            .take()
+        {
             let d = start.elapsed();
             s.llm_total += d;
             let turn = s.turn;
             drop(s);
-            info!("  [{}] turn {turn}: LLM {d:.2?}", self.label);
+            info!(
+                "  [{}] turn {turn}: LLM {d:.2?}",
+                self.label
+            );
         }
         HookAction::cont()
     }
@@ -229,7 +270,10 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         _internal_call_id: &str,
         _args: &str,
     ) -> ToolCallHookAction {
-        self.state.lock().unwrap().tool_start = Some(Instant::now());
+        self.state
+            .lock()
+            .unwrap()
+            .tool_start = Some(Instant::now());
         ToolCallHookAction::cont()
     }
 
@@ -242,13 +286,22 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         result: &str,
     ) -> HookAction {
         {
-            let mut s = self.state.lock().unwrap();
-            if let Some(start) = s.tool_start.take() {
+            let mut s = self
+                .state
+                .lock()
+                .unwrap();
+            if let Some(start) = s
+                .tool_start
+                .take()
+            {
                 let d = start.elapsed();
                 s.tool_total += d;
                 let turn = s.turn;
                 drop(s);
-                info!("  [{}] turn {turn}: tool {tool_name} {d:.2?}", self.label);
+                info!(
+                    "  [{}] turn {turn}: tool {tool_name} {d:.2?}",
+                    self.label
+                );
             }
         }
 
@@ -271,7 +324,10 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
                     .and_then(|v| v.get("optimized_function"))
                     .and_then(|x| x.as_str());
                 if let Some(f) = func {
-                    *self.captured.lock().unwrap() = Some(strip_code_fences(f));
+                    *self
+                        .captured
+                        .lock()
+                        .unwrap() = Some(strip_code_fences(f));
                     return HookAction::terminate("forge_verify compiled — skipping final turn");
                 }
             }

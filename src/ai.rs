@@ -13,14 +13,22 @@ impl Embedder {
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(true),
         )?;
-        Ok(Arc::new(Self(Mutex::new(model))))
+        Ok(Arc::new(Self(Mutex::new(
+            model,
+        ))))
     }
 
     /// Embeds a single string, offloading the blocking model call to a worker thread.
-    pub async fn embed(self: Arc<Self>, text: &str) -> Result<Vec<f32>, String> {
+    pub async fn embed(
+        self: Arc<Self>,
+        text: &str,
+    ) -> Result<Vec<f32>, String> {
         let text = text.to_string();
         tokio::task::spawn_blocking(move || {
-            let mut model = self.0.lock().unwrap();
+            let mut model = self
+                .0
+                .lock()
+                .unwrap();
             let mut embeddings = model
                 .embed(vec![text.as_str()], None)
                 .map_err(|e| format!("Embed error: {e}"))?;
@@ -34,10 +42,22 @@ impl Embedder {
 
     /// Synchronous batch embed — locks the model and embeds every text.
     /// Used by the rig `EmbeddingModel` adapter (which wraps this in spawn_blocking).
-    pub fn embed_blocking(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
-        let mut model = self.0.lock().unwrap();
+    pub fn embed_blocking(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        let mut model = self
+            .0
+            .lock()
+            .unwrap();
         model
-            .embed(texts.iter().map(|s| s.as_str()).collect::<Vec<_>>(), None)
+            .embed(
+                texts
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>(),
+                None,
+            )
             .map_err(|e| format!("Embed error: {e}"))
     }
 }

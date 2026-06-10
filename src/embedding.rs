@@ -27,8 +27,14 @@ impl EmbeddingModel for FastembedAdapter {
     // through rig's client-based `make`, so there is no provider client type.
     type Client = ();
 
-    fn make(_client: &Self::Client, _model: impl Into<String>, _dims: Option<usize>) -> Self {
-        unimplemented!("FastembedAdapter is built via FastembedAdapter::new(), not EmbeddingModel::make()")
+    fn make(
+        _client: &Self::Client,
+        _model: impl Into<String>,
+        _dims: Option<usize>,
+    ) -> Self {
+        unimplemented!(
+            "FastembedAdapter is built via FastembedAdapter::new(), not EmbeddingModel::make()"
+        )
     }
 
     fn ndims(&self) -> usize {
@@ -39,13 +45,21 @@ impl EmbeddingModel for FastembedAdapter {
         &self,
         texts: impl IntoIterator<Item = String> + Send,
     ) -> Result<Vec<Embedding>, EmbeddingError> {
-        let docs: Vec<String> = texts.into_iter().collect();
-        let inner = self.inner.clone();
+        let docs: Vec<String> = texts
+            .into_iter()
+            .collect();
+        let inner = self
+            .inner
+            .clone();
         let to_embed = docs.clone();
 
         let vecs = tokio::task::spawn_blocking(move || inner.embed_blocking(to_embed))
             .await
-            .map_err(|e| EmbeddingError::ProviderError(format!("embed task panicked: {e}")))?
+            .map_err(|e| {
+                EmbeddingError::ProviderError(format!(
+                    "embed task panicked: {e}"
+                ))
+            })?
             .map_err(EmbeddingError::ProviderError)?;
 
         Ok(docs
@@ -53,7 +67,10 @@ impl EmbeddingModel for FastembedAdapter {
             .zip(vecs)
             .map(|(document, v)| Embedding {
                 document,
-                vec: v.into_iter().map(|f| f as f64).collect(),
+                vec: v
+                    .into_iter()
+                    .map(|f| f as f64)
+                    .collect(),
             })
             .collect())
     }
