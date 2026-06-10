@@ -12,6 +12,7 @@ use rig_core::client::CompletionClient;
 use rig_core::completion::{CompletionModel, CompletionResponse, Prompt};
 use rig_core::message::Message;
 use rig_core::providers::deepseek;
+use rig_core::tool::Tool;
 use tracing::info;
 
 use crate::retrieval::GasliteIndex;
@@ -257,16 +258,22 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         // re-emit the same code. On a compile failure we continue so the model can
         // refine using the returned errors.
         if tool_name == FunctionForgeTool::NAME {
-            let compiles = serde_json::from_str::<serde_json::Value>(result)
-                .ok()
-                .and_then(|v| v.get("compiles").and_then(|c| c.as_bool()))
+            let result_json: Option<serde_json::Value> = serde_json::from_str(result).ok();
+            let compiles = result_json
+                .as_ref()
+                .and_then(|v| v.get("compiles"))
+                .and_then(|c| c.as_bool())
                 .unwrap_or(false);
-            if compiles
-                && let Ok(v) = serde_json::from_str::<serde_json::Value>(args)
-                && let Some(f) = v.get("optimized_function").and_then(|x| x.as_str())
-            {
-                *self.captured.lock().unwrap() = Some(strip_code_fences(f).to_string());
-                return HookAction::terminate("forge_verify compiled — skipping final turn");
+            if compiles {
+                let args_json: Option<serde_json::Value> = serde_json::from_str(args).ok();
+                let func = args_json
+                    .as_ref()
+                    .and_then(|v| v.get("optimized_function"))
+                    .and_then(|x| x.as_str());
+                if let Some(f) = func {
+                    *self.captured.lock().unwrap() = Some(strip_code_fences(f));
+                    return HookAction::terminate("forge_verify compiled — skipping final turn");
+                }
             }
         }
 

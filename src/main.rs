@@ -203,7 +203,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the structural "Seeker" matcher from the knowledge base.
     {
         let matcher = load_pattern_matcher(&state.db).await;
-        info!("structural matcher: {} pattern templates loaded", matcher.len());
+        if matcher.is_empty() {
+            warn!("structural matcher: 0 templates (knowledge base empty — ingest patterns first)");
+        } else {
+            info!("structural matcher: {} pattern templates loaded", matcher.len());
+        }
         *state.pattern_matcher.write().unwrap() = Arc::new(matcher);
     }
 
