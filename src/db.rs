@@ -155,7 +155,7 @@ impl Turso {
                                 col_names
                                     .iter()
                                     .zip(row.iter())
-                                    .map(|(col, val)| (col.to_string(), val.clone()))
+                                    .map(|(col, val)| (col.to_string(), decode_cell(val)))
                                     .collect::<HashMap<String, serde_json::Value>>()
                             })
                             .collect();
@@ -167,5 +167,27 @@ impl Turso {
         }
 
         Ok(vec![])
+    }
+}
+
+/// Hrana returns each result cell as `{"type": "text"|"integer"|"float"|"null"|
+/// "blob", "value": ...}`. Flatten it to a plain JSON value so callers can use
+/// `.as_str()` / `.as_i64()`. Cells already in plain form are returned unchanged.
+fn decode_cell(cell: &serde_json::Value) -> serde_json::Value {
+    let Some(ty) = cell.get("type").and_then(|t| t.as_str()) else {
+        return cell.clone();
+    };
+    let value = cell.get("value");
+    match ty {
+        "null" => serde_json::Value::Null,
+        // Hrana encodes integers as strings to preserve 64-bit precision.
+        "integer" => value
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i64>().ok())
+            .map(serde_json::Value::from)
+            .or_else(|| value.cloned())
+            .unwrap_or(serde_json::Value::Null),
+        // text / float / blob → the underlying value.
+        _ => value.cloned().unwrap_or(serde_json::Value::Null),
     }
 }
