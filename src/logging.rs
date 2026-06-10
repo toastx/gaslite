@@ -32,26 +32,42 @@ pub struct RunLog {
 
 /// Where a finished run is recorded. Today: tracing. Tomorrow: Mantle.
 pub trait LoggingSink: Send + Sync {
-    fn log_run<'a>(&'a self, run: &'a RunLog) -> BoxFuture<'a, Result<(), String>>;
+    fn log_run<'a>(
+        &'a self,
+        run: &'a RunLog,
+    ) -> BoxFuture<'a, Result<(), String>>;
 }
 
 /// Default sink — emits the run to `tracing`, performs no I/O.
 pub struct NoopSink;
 
 impl LoggingSink for NoopSink {
-    fn log_run<'a>(&'a self, run: &'a RunLog) -> BoxFuture<'a, Result<(), String>> {
+    fn log_run<'a>(
+        &'a self,
+        run: &'a RunLog,
+    ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             info!(
                 "  run-log (noop): mode={} hash={} gas {}→{} saved={} patterns={} ts={}",
                 run.mode,
                 run.contract_hash,
                 run.gas_original
-                    .map_or_else(|| "n/a".into(), |v| v.to_string()),
+                    .map_or_else(
+                        || "n/a".into(),
+                        |v| v.to_string()
+                    ),
                 run.gas_optimized
-                    .map_or_else(|| "n/a".into(), |v| v.to_string()),
+                    .map_or_else(
+                        || "n/a".into(),
+                        |v| v.to_string()
+                    ),
                 run.gas_saved
-                    .map_or_else(|| "n/a".into(), |v| v.to_string()),
-                run.pattern_ids.len(),
+                    .map_or_else(
+                        || "n/a".into(),
+                        |v| v.to_string()
+                    ),
+                run.pattern_ids
+                    .len(),
                 run.ts,
             );
             Ok(())

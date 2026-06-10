@@ -522,7 +522,9 @@ async fn fan_out_functions(
     category: Option<&'static str>,
     original_source: &str,
 ) -> (String, usize, Vec<String>) {
-    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_FUNCS));
+    let sem = Arc::new(tokio::sync::Semaphore::new(
+        MAX_PARALLEL_FUNCS,
+    ));
     let mut set: tokio::task::JoinSet<FnOptResult> = tokio::task::JoinSet::new();
     for func in functions {
         let state = state.clone();
@@ -541,15 +543,23 @@ async fn fan_out_functions(
                 .acquire()
                 .await
                 .expect("semaphore closed");
-            let adapter = FastembedAdapter::new(state.embedder.clone());
+            let adapter = FastembedAdapter::new(
+                state
+                    .embedder
+                    .clone(),
+            );
             let matcher = state
                 .pattern_matcher
                 .read()
                 .unwrap()
                 .clone();
             let index = GasliteIndex::new(
-                state.qdrant.clone(),
-                state.db.clone(),
+                state
+                    .qdrant
+                    .clone(),
+                state
+                    .db
+                    .clone(),
                 adapter,
                 category,
                 fsrc.clone(),
@@ -573,7 +583,13 @@ async fn fan_out_functions(
                 state.forge_available,
             )
             .await;
-            (start, end, fsrc, optimized, pattern_ids)
+            (
+                start,
+                end,
+                fsrc,
+                optimized,
+                pattern_ids,
+            )
         });
     }
 
@@ -589,7 +605,9 @@ async fn fan_out_functions(
     }
 
     // Splice descending by start offset so earlier replacements don't shift later ones.
-    results.sort_by(|a, b| b.0.cmp(&a.0));
+    results.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+    });
     let mut optimized_code = original_source.to_string();
     let mut optimized_count = 0usize;
     let mut all_patterns: Vec<String> = Vec::new();
@@ -612,7 +630,11 @@ async fn fan_out_functions(
     }
     all_patterns.sort();
     all_patterns.dedup();
-    (optimized_code, optimized_count, all_patterns)
+    (
+        optimized_code,
+        optimized_count,
+        all_patterns,
+    )
 }
 
 async fn optimize_contract(
@@ -720,7 +742,12 @@ async fn optimize_contract(
     let mode: &'static str;
     let mut optimized_code: String;
     let suggested_patterns: Vec<String>;
-    match orchestrator::route(&state.deepseek, &skeleton_text).await {
+    match orchestrator::route(
+        &state.deepseek,
+        &skeleton_text,
+    )
+    .await
+    {
         Ok(orchestrator::Route::Oneshot) => {
             mode = "oneshot";
             info!("=== OPTIMIZING WHOLE CONTRACT (one-shot) ===");
@@ -1054,14 +1081,23 @@ impl ContractSkeleton {
         let mut out = String::new();
         out.push_str("FUNCTIONS (name — body bytes):\n");
         for s in &self.signatures {
-            out.push_str(&format!("- {} [{} bytes]: {}\n", s.name, s.size, s.signature));
+            out.push_str(&format!(
+                "- {} [{} bytes]: {}\n",
+                s.name, s.size, s.signature
+            ));
         }
-        if !self.storage_layout.is_empty() {
+        if !self
+            .storage_layout
+            .is_empty()
+        {
             out.push_str("\nSTATE VARIABLES:\n");
             out.push_str(&self.storage_layout);
             out.push('\n');
         }
-        if !self.file_decls.is_empty() {
+        if !self
+            .file_decls
+            .is_empty()
+        {
             out.push_str("\nFILE-LEVEL DECLARATIONS:\n");
             out.push_str(&self.file_decls);
             out.push('\n');
@@ -1093,7 +1129,10 @@ fn analyze_contract(source: &str) -> ContractSkeleton {
         if let Loc::File(_, s, e) = loc
             && let Some(t) = source.get(s..e)
         {
-            decls.push(t.trim().to_string());
+            decls.push(
+                t.trim()
+                    .to_string(),
+            );
         }
     };
 
@@ -1167,8 +1206,15 @@ fn analyze_contract(source: &str) -> ContractSkeleton {
                     // Signature = header up to the body's opening brace.
                     let signature = func_text
                         .split_once('{')
-                        .map(|(h, _)| h.trim().to_string())
-                        .unwrap_or_else(|| func_text.trim().to_string());
+                        .map(|(h, _)| {
+                            h.trim()
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| {
+                            func_text
+                                .trim()
+                                .to_string()
+                        });
                     signatures.push(FnSig {
                         name: name_ident
                             .name

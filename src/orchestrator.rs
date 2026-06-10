@@ -67,7 +67,10 @@ struct PlanArgs {
 
 /// Route a contract from its skeleton. On any failure (no tool call, unparseable
 /// args), returns `Err` so the caller can fall back to full per-function fan-out.
-pub async fn route(client: &deepseek::Client, skeleton: &str) -> Result<Route, String> {
+pub async fn route(
+    client: &deepseek::Client,
+    skeleton: &str,
+) -> Result<Route, String> {
     let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let hook = CaptureHook { slot: slot.clone() };
 
@@ -95,8 +98,19 @@ pub async fn route(client: &deepseek::Client, skeleton: &str) -> Result<Route, S
     let parsed: PlanArgs =
         serde_json::from_str(&args).map_err(|e| format!("router args parse failed: {e}"))?;
 
-    if parsed.mode.eq_ignore_ascii_case("decompose") && !parsed.tasks.is_empty() {
-        info!("  router: decompose ({} task(s))", parsed.tasks.len());
+    if parsed
+        .mode
+        .eq_ignore_ascii_case("decompose")
+        && !parsed
+            .tasks
+            .is_empty()
+    {
+        info!(
+            "  router: decompose ({} task(s))",
+            parsed
+                .tasks
+                .len()
+        );
         Ok(Route::Decompose(parsed.tasks))
     } else {
         info!("  router: oneshot");
@@ -118,7 +132,10 @@ impl<M: CompletionModel> PromptHook<M> for CaptureHook {
         _internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
-        *self.slot.lock().unwrap() = Some(args.to_string());
+        *self
+            .slot
+            .lock()
+            .unwrap() = Some(args.to_string());
         ToolCallHookAction::terminate("plan captured")
     }
 }
@@ -137,7 +154,10 @@ impl Tool for SubmitPlanTool {
     type Args = PlanArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    async fn definition(
+        &self,
+        _prompt: String,
+    ) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Submit the optimization routing decision for this contract.".to_string(),
@@ -176,7 +196,10 @@ impl Tool for SubmitPlanTool {
         }
     }
 
-    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         // Unreachable in practice: the hook terminates the loop before the tool body
         // executes. Present only so the model is offered the tool.
         Ok("ok".to_string())

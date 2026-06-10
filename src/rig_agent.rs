@@ -173,7 +173,10 @@ pub async fn optimize_function(
 
 /// Render the file-level declarations block for agent context (empty when none).
 fn decls_block(file_decls: &str) -> String {
-    if file_decls.trim().is_empty() {
+    if file_decls
+        .trim()
+        .is_empty()
+    {
         String::new()
     } else {
         format!(
