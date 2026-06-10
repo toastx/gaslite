@@ -84,6 +84,7 @@ pub async fn optimize_function(
     client: &deepseek::Client,
     index: GasliteIndex,
     storage_layout: &str,
+    file_decls: &str,
     original: Arc<str>,
     fn_name: &str,
     fn_source: &str,
@@ -92,8 +93,9 @@ pub async fn optimize_function(
     use_forge: bool,
 ) -> Result<String, String> {
     let context = format!(
-        "STORAGE LAYOUT:\n{storage_layout}\n\n\
-         FUNCTION TO OPTIMIZE:\n```solidity\n{fn_source}\n```"
+        "STORAGE LAYOUT:\n{storage_layout}\n\n{}\
+         FUNCTION TO OPTIMIZE:\n```solidity\n{fn_source}\n```",
+        decls_block(file_decls)
     );
 
     let forge_step = if use_forge {
@@ -167,6 +169,63 @@ pub async fn optimize_function(
     }
 
     result.map_err(|e| format!("[{fn_name}] agent prompt failed: {e}"))
+}
+
+/// Render the file-level declarations block for agent context (empty when none).
+fn decls_block(file_decls: &str) -> String {
+    if file_decls.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "CONTRACT DECLARATIONS (structs / enums / custom errors / events / modifiers the code \
+             may reference — do not redefine or rename these):\n{file_decls}\n\n"
+        )
+    }
+}
+
+/// One-shot whole-contract optimization: a single LLM call that rewrites the entire
+/// contract. No `forge_verify` tool loop — the caller's whole-contract forge gate is
+/// the authority. This is the fast path the orchestrator picks for simple contracts.
+pub async fn optimize_oneshot(
+    client: &deepseek::Client,
+    index: GasliteIndex,
+    storage_layout: &str,
+    file_decls: &str,
+    contract_source: &str,
+) -> Result<String, String> {
+    let context = format!(
+        "STORAGE LAYOUT:\n{storage_layout}\n\n{}\
+         CONTRACT TO OPTIMIZE:\n```solidity\n{contract_source}\n```",
+        decls_block(file_decls)
+    );
+
+    let user = "Optimize the ENTIRE contract by applying the RETRIEVED PATTERNS as templates, \
+        adapting slot derivations and variable names to the contract's storage layout. Preserve \
+        every function's observable behaviour and signature, and keep all existing declarations. \
+        Return ONLY the complete optimized contract in a single ```solidity code block — no \
+        commentary, no explanations.";
+
+    let hook = TimingHook::new("oneshot");
+    let result = client
+        .agent(deepseek::DEEPSEEK_V4_FLASH)
+        .preamble(SYSTEM_PROMPT)
+        .context(&context)
+        .dynamic_context(CONTEXT_SAMPLES, index)
+        .temperature(0.1)
+        .max_tokens(8192)
+        .build()
+        .prompt(user)
+        .with_hook(hook.clone())
+        .max_turns(1)
+        .await;
+
+    let (turns, llm_total, tool_total) = hook.summary();
+    info!(
+        "  [oneshot] {} turn(s) | LLM {:.2?} | forge {:.2?}",
+        turns, llm_total, tool_total
+    );
+
+    result.map_err(|e| format!("[oneshot] agent prompt failed: {e}"))
 }
 
 // ── per-turn timing hook ──────────────────────────────────────────────────────

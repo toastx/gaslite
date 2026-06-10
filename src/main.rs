@@ -4,7 +4,9 @@ mod ai;
 mod db;
 mod embedding;
 mod forge;
+mod logging;
 mod normalize;
+mod orchestrator;
 mod retrieval;
 mod rig_agent;
 mod tools;
@@ -29,7 +31,7 @@ use qdrant_client::{
 };
 use rig_core::{client::ProviderClient, providers::deepseek};
 use serde::{Deserialize, Serialize};
-use solang_parser::pt::{ContractPart, Loc, SourceUnitPart};
+use solang_parser::pt::{ContractPart, FunctionTy, Loc, SourceUnitPart};
 use std::{fs, path::Path, sync::Arc};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -56,6 +58,9 @@ struct AppState {
     /// knowledge base on startup and after ingest/reset. Read-snapshotted per
     /// request so reads never block writes.
     pattern_matcher: std::sync::RwLock<Arc<normalize::PatternMatcher>>,
+    /// Where finished runs are recorded (stubbed: `NoopSink` → tracing). This is the
+    /// seam for on-chain Mantle logging — see [`logging`].
+    logging: Arc<dyn logging::LoggingSink>,
 }
 
 /// L2 cache read — fetch a stored optimization from Turso by normalized key.
@@ -225,6 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pattern_matcher: std::sync::RwLock::new(Arc::new(
             normalize::PatternMatcher::default(),
         )),
+        logging: Arc::new(logging::NoopSink),
     });
 
     // run migration via HTTP
@@ -495,6 +501,120 @@ fn fmt_gas(g: Option<u64>) -> String {
     )
 }
 
+/// Non-cryptographic identity hash of the contract source, for the run log.
+fn hash_source(src: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    src.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Optimize a set of functions concurrently (one scoped agent each, bounded by a
+/// semaphore) and splice the accepted rewrites back into the original source.
+/// Returns `(optimized_code, optimized_count, deduped_pattern_ids)`. Shared by the
+/// decompose and fallback paths.
+async fn fan_out_functions(
+    state: &Arc<AppState>,
+    functions: Vec<FunctionInfo>,
+    original: Arc<str>,
+    storage: Arc<str>,
+    file_decls: Arc<str>,
+    category: Option<&'static str>,
+    original_source: &str,
+) -> (String, usize, Vec<String>) {
+    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_FUNCS));
+    let mut set: tokio::task::JoinSet<FnOptResult> = tokio::task::JoinSet::new();
+    for func in functions {
+        let state = state.clone();
+        let permit_sem = sem.clone();
+        let original = original.clone();
+        let storage = storage.clone();
+        let file_decls = file_decls.clone();
+        let FunctionInfo {
+            name,
+            source: fsrc,
+            start,
+            end,
+        } = func;
+        set.spawn(async move {
+            let _permit = permit_sem
+                .acquire()
+                .await
+                .expect("semaphore closed");
+            let adapter = FastembedAdapter::new(state.embedder.clone());
+            let matcher = state
+                .pattern_matcher
+                .read()
+                .unwrap()
+                .clone();
+            let index = GasliteIndex::new(
+                state.qdrant.clone(),
+                state.db.clone(),
+                adapter,
+                category,
+                fsrc.clone(),
+                matcher,
+                name.clone(),
+            );
+            let pattern_ids = index
+                .pattern_ids()
+                .await
+                .unwrap_or_default();
+            let optimized = rig_agent::optimize_function(
+                &state.deepseek,
+                index,
+                &storage,
+                &file_decls,
+                original.clone(),
+                &name,
+                &fsrc,
+                start,
+                end,
+                state.forge_available,
+            )
+            .await;
+            (start, end, fsrc, optimized, pattern_ids)
+        });
+    }
+
+    let mut results = Vec::new();
+    while let Some(joined) = set
+        .join_next()
+        .await
+    {
+        match joined {
+            Ok(tuple) => results.push(tuple),
+            Err(e) => warn!("  ! function task panicked: {e}"),
+        }
+    }
+
+    // Splice descending by start offset so earlier replacements don't shift later ones.
+    results.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut optimized_code = original_source.to_string();
+    let mut optimized_count = 0usize;
+    let mut all_patterns: Vec<String> = Vec::new();
+    for (start, end, fsrc, optimized, pattern_ids) in &results {
+        all_patterns.extend(
+            pattern_ids
+                .iter()
+                .cloned(),
+        );
+        match optimized {
+            Ok(opt) => {
+                let opt = utils::strip_code_fences(opt);
+                if &opt != fsrc && *end <= optimized_code.len() {
+                    optimized_code.replace_range(*start..*end, &opt);
+                    optimized_count += 1;
+                }
+            }
+            Err(e) => warn!("  ! {e}"),
+        }
+    }
+    all_patterns.sort();
+    all_patterns.dedup();
+    (optimized_code, optimized_count, all_patterns)
+}
+
 async fn optimize_contract(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<OptimizeRequest>,
@@ -532,8 +652,9 @@ async fn optimize_contract(
         return Ok(Json(hit));
     }
 
-    // 1. Parse the contract: detect category, extract functions, storage layout.
-    let (category, functions, storage_layout) = analyze_contract(&payload.contract_source);
+    // 1. Parse the contract into its skeleton: category, functions, storage, decls.
+    let skeleton = analyze_contract(&payload.contract_source);
+    let category = skeleton.category;
     let t_parse = std::time::Instant::now();
     let category_str = category.unwrap_or("general");
 
@@ -550,7 +671,9 @@ async fn optimize_contract(
     );
     info!(
         "  functions: {}",
-        functions.len()
+        skeleton
+            .functions
+            .len()
     );
     info!(
         "  forge    : {}",
@@ -562,47 +685,45 @@ async fn optimize_contract(
     );
     info!("========================");
 
-    if functions.is_empty() {
+    if skeleton
+        .functions
+        .is_empty()
+    {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             "No optimizable functions found — ensure the contract parses correctly".to_string(),
         ));
     }
 
-    // 2. Optimize every function concurrently — one rig agent per function, bounded by a semaphore.
-    //    Each agent does its own retrieval and (when forge is available) its own compile loop
-    //    against the original contract.
-    info!(
-        "=== OPTIMIZING {} FUNCTIONS CONCURRENTLY ===",
-        functions.len()
-    );
+    // Shared inputs for whichever optimization path the router picks.
     let original: Arc<str> = Arc::from(
         payload
             .contract_source
             .as_str(),
     );
-    let storage: Arc<str> = Arc::from(storage_layout.as_str());
-    let sem = Arc::new(tokio::sync::Semaphore::new(
-        MAX_PARALLEL_FUNCS,
-    ));
+    let storage: Arc<str> = Arc::from(
+        skeleton
+            .storage_layout
+            .as_str(),
+    );
+    let file_decls: Arc<str> = Arc::from(
+        skeleton
+            .file_decls
+            .as_str(),
+    );
+    let skeleton_text = skeleton.render();
+    let all_functions = skeleton.functions;
 
-    let mut set: tokio::task::JoinSet<FnOptResult> = tokio::task::JoinSet::new();
-    for func in functions {
-        let state = state.clone();
-        let permit_sem = sem.clone();
-        let original = original.clone();
-        let storage = storage.clone();
-        let FunctionInfo {
-            name,
-            source: fsrc,
-            start,
-            end,
-        } = func;
-        set.spawn(async move {
-            let _permit = permit_sem
-                .acquire()
-                .await
-                .expect("semaphore closed");
+    // 2. Route: one lightweight orchestrator call decides oneshot vs decompose from
+    //    the skeleton. Any routing failure falls back to full per-function fan-out, so
+    //    robustness never regresses.
+    let mode: &'static str;
+    let mut optimized_code: String;
+    let suggested_patterns: Vec<String>;
+    match orchestrator::route(&state.deepseek, &skeleton_text).await {
+        Ok(orchestrator::Route::Oneshot) => {
+            mode = "oneshot";
+            info!("=== OPTIMIZING WHOLE CONTRACT (one-shot) ===");
             let adapter = FastembedAdapter::new(
                 state
                     .embedder
@@ -622,83 +743,102 @@ async fn optimize_contract(
                     .clone(),
                 adapter,
                 category,
-                fsrc.clone(),
+                payload
+                    .contract_source
+                    .clone(),
                 matcher,
-                name.clone(),
+                "oneshot",
             );
-            let pattern_ids = index
+            let mut pattern_ids = index
                 .pattern_ids()
                 .await
                 .unwrap_or_default();
-            let optimized = rig_agent::optimize_function(
+            optimized_code = match rig_agent::optimize_oneshot(
                 &state.deepseek,
                 index,
                 &storage,
+                &file_decls,
+                &payload.contract_source,
+            )
+            .await
+            {
+                Ok(c) => utils::strip_code_fences(&c).to_string(),
+                Err(e) => {
+                    warn!("  ! one-shot failed: {e} — keeping original");
+                    payload
+                        .contract_source
+                        .clone()
+                }
+            };
+            pattern_ids.sort();
+            pattern_ids.dedup();
+            suggested_patterns = pattern_ids;
+        }
+        Ok(orchestrator::Route::Decompose(tasks)) => {
+            mode = "decompose";
+            let mut wanted: Vec<String> = tasks
+                .iter()
+                .flat_map(|t| {
+                    t.target_fns
+                        .iter()
+                        .cloned()
+                })
+                .collect();
+            wanted.sort();
+            wanted.dedup();
+            let selected: Vec<FunctionInfo> = if all_functions
+                .iter()
+                .any(|f| wanted.contains(&f.name))
+            {
+                all_functions
+                    .into_iter()
+                    .filter(|f| wanted.contains(&f.name))
+                    .collect()
+            } else {
+                warn!("  router named no known functions — fanning out all");
+                all_functions
+            };
+            info!(
+                "=== OPTIMIZING {} FUNCTION(S) (decompose) ===",
+                selected.len()
+            );
+            let (code, count, patterns) = fan_out_functions(
+                &state,
+                selected,
                 original.clone(),
-                &name,
-                &fsrc,
-                start,
-                end,
-                state.forge_available,
+                storage.clone(),
+                file_decls.clone(),
+                category,
+                &payload.contract_source,
             )
             .await;
-            (
-                start,
-                end,
-                fsrc,
-                optimized,
-                pattern_ids,
+            info!("  functions optimized: {count}");
+            optimized_code = code;
+            suggested_patterns = patterns;
+        }
+        Err(e) => {
+            mode = "fallback";
+            warn!("  router failed ({e}) — falling back to per-function fan-out");
+            info!(
+                "=== OPTIMIZING {} FUNCTIONS (fallback fan-out) ===",
+                all_functions.len()
+            );
+            let (code, count, patterns) = fan_out_functions(
+                &state,
+                all_functions,
+                original.clone(),
+                storage.clone(),
+                file_decls.clone(),
+                category,
+                &payload.contract_source,
             )
-        });
-    }
-
-    let mut results = Vec::new();
-    while let Some(joined) = set
-        .join_next()
-        .await
-    {
-        match joined {
-            Ok(tuple) => results.push(tuple),
-            Err(e) => warn!("  ! function task panicked: {e}"),
+            .await;
+            info!("  functions optimized: {count}");
+            optimized_code = code;
+            suggested_patterns = patterns;
         }
     }
     let t_agent = std::time::Instant::now();
-
-    // 3. Splice optimized functions back (descending start keeps offsets valid), and aggregate
-    //    pattern ids for the response.
-    results.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-    });
-    let mut optimized_code = payload
-        .contract_source
-        .clone();
-    let mut optimized_count = 0usize;
-    let mut all_patterns: Vec<String> = Vec::new();
-    for (start, end, fsrc, optimized, pattern_ids) in &results {
-        all_patterns.extend(
-            pattern_ids
-                .iter()
-                .cloned(),
-        );
-        match optimized {
-            Ok(opt) => {
-                let opt = utils::strip_code_fences(opt);
-                if &opt != fsrc && *end <= optimized_code.len() {
-                    optimized_code.replace_range(*start..*end, &opt);
-                    optimized_count += 1;
-                }
-            }
-            Err(e) => warn!("  ! {e}"),
-        }
-    }
-    all_patterns.sort();
-    all_patterns.dedup();
-    let suggested_patterns = all_patterns;
-    info!(
-        "  functions optimized: {}/{}",
-        optimized_count,
-        results.len()
-    );
 
     // 4. Final authoritative forge check. We only return the rewrite when it compiles AND
     //    demonstrably saves construction gas; otherwise we keep the original. Note this proves
@@ -709,6 +849,10 @@ async fn optimize_contract(
     // one-shot. Transient failures (compile error, regression, forge error) are
     // NOT cached, so an identical request can be retried.
     let cacheable: bool;
+    // Gas figures captured for the run log (set only when forge measured them).
+    let mut run_gas_original: Option<u64> = None;
+    let mut run_gas_optimized: Option<u64> = None;
+    let mut run_gas_saved: Option<i64> = None;
     if state.forge_available {
         match forge::run_forge_sandbox_async(
             payload
@@ -729,6 +873,9 @@ async fn optimize_contract(
                 let saved = vr
                     .gas_saved
                     .unwrap_or(0);
+                run_gas_original = vr.gas_original;
+                run_gas_optimized = vr.gas_optimized;
+                run_gas_saved = vr.gas_saved;
                 info!(
                     "  forge accepted: original={} optimized={} saved={}",
                     fmt_gas(vr.gas_original),
@@ -795,13 +942,14 @@ async fn optimize_contract(
     let t_verify = std::time::Instant::now();
 
     info!("=== OPTIMIZE COMPLETE ===");
+    info!("  mode     : {}", mode);
     info!(
         "  patterns : {}",
         suggested_patterns.len()
     );
     info!("  cached   : {}", cacheable);
     info!(
-        "  timing   : parse {:.2?} | functions {:.2?} | final-verify {:.2?}",
+        "  timing   : parse {:.2?} | route+agents {:.2?} | final-verify {:.2?}",
         t_parse - t0,
         t_agent - t_parse,
         t_verify - t_agent,
@@ -811,6 +959,27 @@ async fn optimize_contract(
         t0.elapsed()
     );
     info!("=========================");
+
+    // Record the run (stub sink → tracing; the seam for on-chain Mantle logging).
+    let run = logging::RunLog {
+        contract_hash: hash_source(&payload.contract_source),
+        mode,
+        gas_original: run_gas_original,
+        gas_optimized: run_gas_optimized,
+        gas_saved: run_gas_saved,
+        pattern_ids: suggested_patterns.clone(),
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+    if let Err(e) = state
+        .logging
+        .log_run(&run)
+        .await
+    {
+        warn!("  run-log sink failed: {e}");
+    }
 
     let response = OptimizeResponse {
         analysis,
@@ -856,24 +1025,77 @@ struct FunctionInfo {
     end: usize,
 }
 
-fn analyze_contract(
-    source: &str
-) -> (
-    Option<&'static str>,
-    Vec<FunctionInfo>,
-    String,
-) {
+/// A function header + body size, for the router's skeleton view.
+struct FnSig {
+    name: String,
+    signature: String,
+    size: usize,
+}
+
+/// The structural view of a parsed contract. `functions` + `storage_layout` drive
+/// the per-function/oneshot agents; `file_decls` + `signatures` are the lightweight
+/// "skeleton" the orchestrator routes on (no function bodies).
+struct ContractSkeleton {
+    category: Option<&'static str>,
+    functions: Vec<FunctionInfo>,
+    /// State-variable declarations, newline-joined (agent slot-derivation context).
+    storage_layout: String,
+    /// File-level declarations a function depends on to compile: structs, enums,
+    /// custom errors, events, modifiers, user types. Injected into scoped agents so
+    /// they don't reference or invent the wrong definitions.
+    file_decls: String,
+    signatures: Vec<FnSig>,
+}
+
+impl ContractSkeleton {
+    /// Render the skeleton (signatures + sizes + decl summary) for the router — no
+    /// function bodies, to keep the routing prompt small and its TTFT low.
+    fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("FUNCTIONS (name — body bytes):\n");
+        for s in &self.signatures {
+            out.push_str(&format!("- {} [{} bytes]: {}\n", s.name, s.size, s.signature));
+        }
+        if !self.storage_layout.is_empty() {
+            out.push_str("\nSTATE VARIABLES:\n");
+            out.push_str(&self.storage_layout);
+            out.push('\n');
+        }
+        if !self.file_decls.is_empty() {
+            out.push_str("\nFILE-LEVEL DECLARATIONS:\n");
+            out.push_str(&self.file_decls);
+            out.push('\n');
+        }
+        out
+    }
+}
+
+fn analyze_contract(source: &str) -> ContractSkeleton {
+    let empty = || ContractSkeleton {
+        category: detect_category_fallback(source),
+        functions: vec![],
+        storage_layout: String::new(),
+        file_decls: String::new(),
+        signatures: vec![],
+    };
     let Ok((su, _)) = solang_parser::parse(source, 0) else {
-        return (
-            detect_category_fallback(source),
-            vec![],
-            String::new(),
-        );
+        return empty();
     };
 
     let mut category: Option<&'static str> = None;
     let mut functions: Vec<FunctionInfo> = Vec::new();
+    let mut signatures: Vec<FnSig> = Vec::new();
     let mut storage_vars: Vec<String> = Vec::new();
+    let mut decls: Vec<String> = Vec::new();
+
+    // Append the source text spanned by `loc` to `decls` (trimmed).
+    let push_decl = |loc: Loc, decls: &mut Vec<String>| {
+        if let Loc::File(_, s, e) = loc
+            && let Some(t) = source.get(s..e)
+        {
+            decls.push(t.trim().to_string());
+        }
+    };
 
     for part in su.0 {
         let SourceUnitPart::ContractDefinition(def) = part else {
@@ -915,9 +1137,23 @@ fn analyze_contract(
                         );
                     }
                 }
+                // File-level dependencies a function may reference — context only.
+                ContractPart::StructDefinition(d) => push_decl(d.loc, &mut decls),
+                ContractPart::EnumDefinition(d) => push_decl(d.loc, &mut decls),
+                ContractPart::EventDefinition(d) => push_decl(d.loc, &mut decls),
+                ContractPart::ErrorDefinition(d) => push_decl(d.loc, &mut decls),
+                ContractPart::TypeDefinition(d) => push_decl(d.loc, &mut decls),
                 ContractPart::FunctionDefinition(func) => {
-                    // Extract only named functions with a body (skip constructor/
+                    // Modifiers are dependencies, not optimization targets.
+                    if matches!(func.ty, FunctionTy::Modifier) {
+                        push_decl(func.loc, &mut decls);
+                        continue;
+                    }
+                    // Optimize only named, bodied `function`s (skip constructor/
                     // fallback/receive and abstract declarations).
+                    if !matches!(func.ty, FunctionTy::Function) {
+                        continue;
+                    }
                     let Some(name_ident) = &func.name else {
                         continue;
                     };
@@ -928,6 +1164,18 @@ fn analyze_contract(
                     let Some(func_text) = source.get(start..end) else {
                         continue;
                     };
+                    // Signature = header up to the body's opening brace.
+                    let signature = func_text
+                        .split_once('{')
+                        .map(|(h, _)| h.trim().to_string())
+                        .unwrap_or_else(|| func_text.trim().to_string());
+                    signatures.push(FnSig {
+                        name: name_ident
+                            .name
+                            .clone(),
+                        signature,
+                        size: end.saturating_sub(start),
+                    });
                     functions.push(FunctionInfo {
                         name: name_ident
                             .name
@@ -942,11 +1190,13 @@ fn analyze_contract(
         }
     }
 
-    (
+    ContractSkeleton {
         category,
         functions,
-        storage_vars.join("\n"),
-    )
+        storage_layout: storage_vars.join("\n"),
+        file_decls: decls.join("\n\n"),
+        signatures,
+    }
 }
 
 fn detect_category_fallback(source: &str) -> Option<&'static str> {
