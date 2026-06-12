@@ -8,7 +8,6 @@
 //! wrong storage-slot derivation that construction-gas measurement cannot see.
 //!
 //! One agent per function — these are generated concurrently (one thread each).
-//! //
 
 use rig_core::client::CompletionClient;
 use rig_core::completion::Prompt;
@@ -100,12 +99,6 @@ pub async fn gen_equivalence_test(
            value, AND every public getter the function could have touched — including ones it \
            should NOT have changed (e.g. after approve, also check ownerOf and balanceOf are \
            still equal). Wrong-storage-slot bugs hide exactly there.\n\
-         - MANDATORY balance coverage: after any call that moves or changes balances, assert \
-           `o.balanceOf(X) == p.balanceOf(X)` for EVERY address involved — the CALLER \
-           (address(this)) FIRST, then every recipient/other party — and assert `o.totalSupply() \
-           == p.totalSupply()`. The single most-missed bug is an off-by-one or non-conserving \
-           change to the CALLER's own balance (e.g. debiting 6 while crediting 5); checking only \
-           the recipient lets it slip through. Never skip the caller's balance.\n\
          - Use distinct literals so swapped values can't cancel out (e.g. two different \
            addresses, token ids 0 and 1) and exercise the function at least twice when cheap.\n\
          - One `require(a == b, \"label\")` per checked value, with a short unique label.\n\
@@ -169,5 +162,3 @@ pub async fn gen_equivalence_test(
 
     Ok(strip_code_fences(&result).to_string())
 }
-
-
