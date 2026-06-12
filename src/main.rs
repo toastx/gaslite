@@ -11,6 +11,7 @@ mod retrieval;
 mod rig_agent;
 mod tools;
 mod utils;
+mod verify_agent;
 
 use ai::Embedder;
 use db::{Turso, TursoArg};
@@ -41,6 +42,10 @@ pub const COLLECTION: &str = "gaslite_patterns";
 const VECTOR_DIM: u64 = 384;
 /// Max functions optimized concurrently (bounds in-flight DeepSeek requests).
 const MAX_PARALLEL_FUNCS: usize = 6;
+/// Contracts at or below BOTH thresholds skip the router LLM call — they are
+/// always routed oneshot, so the round-trip is pure latency.
+const ONESHOT_MAX_FUNCS: usize = 4;
+const ONESHOT_MAX_BYTES: usize = 4096;
 
 // ── app state ─────────────────────────────────────────────────────────────────
 struct AppState {
@@ -637,6 +642,204 @@ async fn fan_out_functions(
     )
 }
 
+/// Behavioural verification: generate a differential equivalence test per function
+/// (one thread each), then run them all in one forge harness. The optimized contract
+/// is accepted only if it compiles AND every function behaves identically to the
+/// original — which construction-gas measurement alone cannot prove.
+/// How many times broken (sanity-failing) tests are regenerated with feedback
+/// before we give up and report those functions as unverified.
+const VERIFY_REGEN_ROUNDS: usize = 1;
+
+/// Generate `test_eq_*` bodies for `targets` concurrently (one task each).
+/// `feedback` maps a function name to `(previous test source, sanity failure)`
+/// for regeneration rounds. Returns `(name, body)` pairs for the successes.
+async fn gen_equiv_tests(
+    state: &Arc<AppState>,
+    original_source: &str,
+    storage_layout: &str,
+    orig_type: &str,
+    opt_type: &str,
+    targets: &[(String, String)],
+    feedback: &std::collections::HashMap<String, (String, String)>,
+) -> Vec<(String, String)> {
+    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_FUNCS));
+    let mut set: tokio::task::JoinSet<(String, Result<String, String>)> =
+        tokio::task::JoinSet::new();
+    for (name, sig) in targets {
+        let state = state.clone();
+        let permit_sem = sem.clone();
+        let original_source = original_source.to_string();
+        let storage = storage_layout.to_string();
+        let orig_type = orig_type.to_string();
+        let opt_type = opt_type.to_string();
+        let name = name.clone();
+        let sig = sig.clone();
+        let prev = feedback
+            .get(&name)
+            .cloned();
+        set.spawn(async move {
+            let _permit = permit_sem
+                .acquire()
+                .await
+                .expect("semaphore closed");
+            let body = verify_agent::gen_equivalence_test(
+                &state.deepseek,
+                &original_source,
+                &storage,
+                &orig_type,
+                &opt_type,
+                &name,
+                &sig,
+                prev.as_ref()
+                    .map(|(c, f)| (c.as_str(), f.as_str())),
+            )
+            .await;
+            (name, body)
+        });
+    }
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    while let Some(joined) = set
+        .join_next()
+        .await
+    {
+        match joined {
+            Ok((name, Ok(body))) if !body
+                .trim()
+                .is_empty() =>
+            {
+                out.push((name, body))
+            }
+            Ok((name, Ok(_))) => warn!("  ! verify-test gen produced empty body for {name}"),
+            Ok((name, Err(e))) => warn!("  ! verify-test gen failed for {name}: {e}"),
+            Err(e) => warn!("  ! verify-test task panicked: {e}"),
+        }
+    }
+    out
+}
+
+async fn behavioral_verify(
+    state: &Arc<AppState>,
+    original_source: &str,
+    optimized_code: &str,
+    targets: &[(String, String)],
+    storage_layout: &str,
+    // Pre-generated `test_eq_*` bodies — produced concurrently with the
+    // optimization itself (they depend only on the original contract).
+    mut test_fns: Vec<(String, String)>,
+) -> Result<forge::EquivResult, String> {
+    let orig_type = forge::extract_sol_contract_name(original_source)
+        .unwrap_or_else(|| "OriginalContract".to_string());
+    let opt_type = format!("{orig_type}Optimized");
+
+    // 1. Fallback: if the concurrent pre-generation produced nothing (task failed
+    //    or returned empty), generate here so verification can still proceed.
+    if test_fns.is_empty() {
+        test_fns = gen_equiv_tests(
+            state,
+            original_source,
+            storage_layout,
+            &orig_type,
+            &opt_type,
+            targets,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+    }
+    if test_fns.is_empty() {
+        return Err("no equivalence tests could be generated".to_string());
+    }
+
+    // 2. Run the differential harness (build + all test_eq_* on a Mantle fork).
+    let mut er = forge::run_equivalence_async(
+        original_source.to_string(),
+        optimized_code.to_string(),
+        test_fns.clone(),
+    )
+    .await?;
+
+    // 3. Tests that failed the original-vs-original sanity suite are bugs in the
+    //    TEST. Regenerate just those, feeding each agent its own broken test plus
+    //    the failure line, and re-run. A failed regen round keeps the previous
+    //    result, so retrying can only improve coverage, never lose it.
+    for round in 1..=VERIFY_REGEN_ROUNDS {
+        if er
+            .invalid
+            .is_empty()
+        {
+            break;
+        }
+        info!(
+            "  verify: regenerating {} broken test(s) with failure feedback (round {round})",
+            er.invalid
+                .len()
+        );
+
+        let mut feedback: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::new();
+        for name in &er.invalid {
+            let prev_body = test_fns
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, b)| b.clone())
+                .unwrap_or_default();
+            let reason = er
+                .invalid_reasons
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            feedback.insert(name.clone(), (prev_body, reason));
+        }
+        let regen_targets: Vec<(String, String)> = targets
+            .iter()
+            .filter(|(n, _)| {
+                er.invalid
+                    .contains(n)
+            })
+            .cloned()
+            .collect();
+
+        let regenerated = gen_equiv_tests(
+            state,
+            original_source,
+            storage_layout,
+            &orig_type,
+            &opt_type,
+            &regen_targets,
+            &feedback,
+        )
+        .await;
+        if regenerated.is_empty() {
+            warn!("  verify: regen produced no tests — keeping previous result");
+            break;
+        }
+        for (name, body) in regenerated {
+            if let Some(slot) = test_fns
+                .iter_mut()
+                .find(|(n, _)| *n == name)
+            {
+                slot.1 = body;
+            }
+        }
+
+        match forge::run_equivalence_async(
+            original_source.to_string(),
+            optimized_code.to_string(),
+            test_fns.clone(),
+        )
+        .await
+        {
+            Ok(new_er) => er = new_er,
+            Err(e) => {
+                warn!("  verify: regen round failed ({e}) — keeping previous result");
+                break;
+            }
+        }
+    }
+
+    Ok(er)
+}
+
 async fn optimize_contract(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<OptimizeRequest>,
@@ -723,10 +926,15 @@ async fn optimize_contract(
             .contract_source
             .as_str(),
     );
+    // Storage context for the optimization agents = raw declarations + the
+    // deterministic per-contract slot-derivation guide, so the model uses THIS
+    // layout's slots rather than a retrieved pattern's incompatible scheme.
     let storage: Arc<str> = Arc::from(
-        skeleton
-            .storage_layout
-            .as_str(),
+        format!(
+            "{}\n\n{}",
+            skeleton.storage_layout, skeleton.slot_guide
+        )
+        .as_str(),
     );
     let file_decls: Arc<str> = Arc::from(
         skeleton
@@ -734,20 +942,77 @@ async fn optimize_contract(
             .as_str(),
     );
     let skeleton_text = skeleton.render();
+    // Captured before `functions` is moved into the routing arms — used by the
+    // behavioural verifier to generate a differential test per function.
+    let verify_targets: Vec<(String, String)> = skeleton
+        .signatures
+        .iter()
+        .map(|s| {
+            (
+                s.name
+                    .clone(),
+                s.signature
+                    .clone(),
+            )
+        })
+        .collect();
     let all_functions = skeleton.functions;
 
-    // 2. Route: one lightweight orchestrator call decides oneshot vs decompose from
-    //    the skeleton. Any routing failure falls back to full per-function fan-out, so
-    //    robustness never regresses.
+    // 2. Start generating the equivalence tests NOW, concurrently with the
+    //    optimization itself: they are derived from the ORIGINAL contract only, so
+    //    the verify agents' LLM calls overlap the optimizer's instead of running
+    //    serially after it. The handle is joined (or aborted) at the verify stage.
+    let pregen_tests: Option<tokio::task::JoinHandle<Vec<(String, String)>>> =
+        if state.forge_available {
+            let state = state.clone();
+            let original_source = payload
+                .contract_source
+                .clone();
+            let storage = storage.to_string();
+            let targets = verify_targets.clone();
+            Some(tokio::spawn(async move {
+                let orig_type = forge::extract_sol_contract_name(&original_source)
+                    .unwrap_or_else(|| "OriginalContract".to_string());
+                let opt_type = format!("{orig_type}Optimized");
+                gen_equiv_tests(
+                    &state,
+                    &original_source,
+                    &storage,
+                    &orig_type,
+                    &opt_type,
+                    &targets,
+                    &std::collections::HashMap::new(),
+                )
+                .await
+            }))
+        } else {
+            None
+        };
+
+    // 3. Route. Small contracts skip the router LLM call entirely — the answer is
+    //    always oneshot, so a deterministic gate saves the round-trip and removes a
+    //    failure surface. Bigger contracts get the orchestrator decision; any
+    //    routing failure falls back to full per-function fan-out, so robustness
+    //    never regresses.
     let mode: &'static str;
     let mut optimized_code: String;
     let suggested_patterns: Vec<String>;
-    match orchestrator::route(
-        &state.deepseek,
-        &skeleton_text,
-    )
-    .await
+    let route = if all_functions.len() <= ONESHOT_MAX_FUNCS
+        && payload
+            .contract_source
+            .len()
+            <= ONESHOT_MAX_BYTES
     {
+        info!("  router: oneshot (heuristic — small contract, no LLM call)");
+        Ok(orchestrator::Route::Oneshot)
+    } else {
+        orchestrator::route(
+            &state.deepseek,
+            &skeleton_text,
+        )
+        .await
+    };
+    match route {
         Ok(orchestrator::Route::Oneshot) => {
             mode = "oneshot";
             info!("=== OPTIMIZING WHOLE CONTRACT (one-shot) ===");
@@ -867,10 +1132,8 @@ async fn optimize_contract(
     }
     let t_agent = std::time::Instant::now();
 
-    // 4. Final authoritative forge check. We only return the rewrite when it compiles AND
-    //    demonstrably saves construction gas; otherwise we keep the original. Note this proves
-    //    "compiles + cheaper constructor", NOT behavioural equivalence — the sandbox does not test
-    //    runtime semantics.
+    // 4. Final authoritative gate: behavioural equivalence (differential tests vs
+    //    the original on a Mantle fork) + a proven construction-gas win.
     let analysis: String;
     // Whether the result is worth caching: a real optimization or a clean
     // one-shot. Transient failures (compile error, regression, forge error) are
@@ -880,85 +1143,160 @@ async fn optimize_contract(
     let mut run_gas_original: Option<u64> = None;
     let mut run_gas_optimized: Option<u64> = None;
     let mut run_gas_saved: Option<i64> = None;
-    if state.forge_available {
-        match forge::run_forge_sandbox_async(
-            payload
-                .contract_source
-                .clone(),
-            optimized_code.clone(),
+    if optimized_code == payload.contract_source {
+        // No rewrite was produced (agent failure / nothing changed) — verifying
+        // the original against itself would waste ~seconds of forge + LLM time.
+        if let Some(h) = pregen_tests {
+            h.abort();
+        }
+        warn!("  verify: skipped — no rewrite produced, returning original");
+        analysis = "No optimized rewrite produced — original returned unchanged.".to_string();
+        cacheable = false;
+    } else if state.forge_available {
+        // Join the tests that were generated concurrently with the optimization.
+        let test_fns: Vec<(String, String)> = match pregen_tests {
+            Some(h) => h
+                .await
+                .unwrap_or_else(|e| {
+                    warn!("  ! verify-test pregen task failed: {e}");
+                    Vec::new()
+                }),
+            None => Vec::new(),
+        };
+        match behavioral_verify(
+            &state,
+            &payload.contract_source,
+            &optimized_code,
+            &verify_targets,
+            storage.as_ref(),
+            test_fns,
         )
         .await
         {
-            // Accept only on a proven gas improvement.
-            Ok(vr)
-                if vr.compiles
-                    && vr
+            // Behaviourally equivalent AND a construction-gas win → accept.
+            Ok(er)
+                if er.compiles
+                    && er.all_passed
+                    && er
                         .gas_saved
                         .unwrap_or(0)
                         > 0 =>
             {
-                let saved = vr
+                let saved = er
                     .gas_saved
                     .unwrap_or(0);
-                run_gas_original = vr.gas_original;
-                run_gas_optimized = vr.gas_optimized;
-                run_gas_saved = vr.gas_saved;
+                run_gas_original = er.gas_original;
+                run_gas_optimized = er.gas_optimized;
+                run_gas_saved = er.gas_saved;
+                if !er
+                    .invalid
+                    .is_empty()
+                {
+                    warn!(
+                        "  verify: {:?} had broken tests (failed sanity) — those functions are UNVERIFIED",
+                        er.invalid
+                    );
+                }
                 info!(
-                    "  forge accepted: original={} optimized={} saved={}",
-                    fmt_gas(vr.gas_original),
-                    fmt_gas(vr.gas_optimized),
+                    "  verify ACCEPTED: {}/{} equivalence test(s) passed | construction gas {} → {} (saved {})",
+                    er.valid_count,
+                    verify_targets.len(),
+                    fmt_gas(er.gas_original),
+                    fmt_gas(er.gas_optimized),
                     saved
                 );
                 analysis = format!(
-                    "Compiled on a Mantle fork; construction gas {} → {} (saved {}). \
-                     Behavioural equivalence is not tested.",
-                    fmt_gas(vr.gas_original),
-                    fmt_gas(vr.gas_optimized),
+                    "Behaviourally equivalent to the original on {} differential test(s) on a \
+                     Mantle fork{}. Construction gas {} → {} (saved {}).",
+                    er.valid_count,
+                    if er
+                        .invalid
+                        .is_empty()
+                    {
+                        String::new()
+                    } else {
+                        format!(
+                            " (unverified — test generation failed: {})",
+                            er.invalid
+                                .join(", ")
+                        )
+                    },
+                    fmt_gas(er.gas_original),
+                    fmt_gas(er.gas_optimized),
                     saved
                 );
                 cacheable = true;
             }
-            // Compiles but no proven improvement (regression, zero, or unmeasured) → keep original.
-            Ok(vr) if vr.compiles => {
+            // Equivalent but no construction-gas win → keep original.
+            Ok(er) if er.compiles && er.all_passed => {
+                warn!("  verify: equivalent but no gas improvement — keeping original");
+                optimized_code = payload
+                    .contract_source
+                    .clone();
+                analysis = "Rewrite rejected — behaviourally equivalent but no construction-gas \
+                     improvement. Kept original."
+                    .to_string();
+                cacheable = false;
+            }
+            // Compiled but a genuine behavioural mismatch (the test passed against
+            // original-vs-original, so the divergence is real) → reject.
+            Ok(er) if er.compiles && !er.failed.is_empty() => {
                 warn!(
-                    "  forge: no proven gas improvement (saved={:?}) — keeping original",
-                    vr.gas_saved
+                    "  verify: BEHAVIOURAL MISMATCH in {:?} (broken tests excluded: {:?}) — keeping original",
+                    er.failed, er.invalid
+                );
+                warn!(
+                    "  verify forge output (truncated):\n{}",
+                    er.forge_output
+                        .chars()
+                        .take(1500)
+                        .collect::<String>()
                 );
                 optimized_code = payload
                     .contract_source
                     .clone();
-                analysis = match vr.gas_saved {
-                    Some(s) => format!(
-                        "Rewrite rejected — no gas improvement (construction gas saved {s}). Kept original."
-                    ),
-                    None => {
-                        "Rewrite rejected — construction gas could not be measured. Kept original."
-                            .to_string()
-                    }
-                };
+                analysis = format!(
+                    "Rewrite rejected — behavioural mismatch vs original in: {}. Kept original.",
+                    er.failed
+                        .join(", ")
+                );
+                cacheable = false;
+            }
+            // Compiled, no genuine failures, but no valid test ran either (every
+            // generated test was broken) → unverified, don't ship.
+            Ok(er) if er.compiles => {
+                warn!(
+                    "  verify: no valid equivalence tests (all broken: {:?}) — keeping original",
+                    er.invalid
+                );
+                optimized_code = payload
+                    .contract_source
+                    .clone();
+                analysis = "Rewrite rejected — equivalence could not be established (test \
+                     generation produced no valid tests). Kept original."
+                    .to_string();
                 cacheable = false;
             }
             // Did not compile → keep original.
-            Ok(vr) => {
-                warn!("  forge: optimized did not compile — keeping original");
+            Ok(er) => {
+                warn!("  verify: optimized did not compile — keeping original");
                 optimized_code = payload
                     .contract_source
                     .clone();
                 analysis = format!(
                     "Rewrite rejected — did not compile. Kept original. Errors: {}",
-                    vr.errors
+                    er.errors
                         .join("; ")
                 );
                 cacheable = false;
             }
-            // Forge errored, timed out, or panicked — can't verify, so don't ship it.
+            // Could not run verification at all → don't ship.
             Err(e) => {
-                warn!("  forge check failed: {e} — keeping original (could not verify)");
+                warn!("  verify failed: {e} — keeping original (could not verify)");
                 optimized_code = payload
                     .contract_source
                     .clone();
-                analysis =
-                    format!("Rewrite rejected — could not verify (forge: {e}). Kept original.");
+                analysis = format!("Rewrite rejected — could not verify ({e}). Kept original.");
                 cacheable = false;
             }
         }
@@ -1071,6 +1409,10 @@ struct ContractSkeleton {
     /// custom errors, events, modifiers, user types. Injected into scoped agents so
     /// they don't reference or invent the wrong definitions.
     file_decls: String,
+    /// Deterministic, per-contract storage-slot derivations (using `.slot` accessors),
+    /// so the model uses THIS contract's actual layout instead of copying a retrieved
+    /// pattern's (possibly packed/incompatible) slot scheme.
+    slot_guide: String,
     signatures: Vec<FnSig>,
 }
 
@@ -1112,6 +1454,7 @@ fn analyze_contract(source: &str) -> ContractSkeleton {
         functions: vec![],
         storage_layout: String::new(),
         file_decls: String::new(),
+        slot_guide: String::new(),
         signatures: vec![],
     };
     let Ok((su, _)) = solang_parser::parse(source, 0) else {
@@ -1122,6 +1465,8 @@ fn analyze_contract(source: &str) -> ContractSkeleton {
     let mut functions: Vec<FunctionInfo> = Vec::new();
     let mut signatures: Vec<FnSig> = Vec::new();
     let mut storage_vars: Vec<String> = Vec::new();
+    // (name, declaration_text) for state vars — drives the slot-derivation guide.
+    let mut state_var_defs: Vec<(String, String)> = Vec::new();
     let mut decls: Vec<String> = Vec::new();
 
     // Append the source text spanned by `loc` to `decls` (trimmed).
@@ -1170,10 +1515,17 @@ fn analyze_contract(source: &str) -> ContractSkeleton {
                     if let Loc::File(_, start, end) = var.loc
                         && let Some(text) = source.get(start..end)
                     {
-                        storage_vars.push(
-                            text.trim()
-                                .to_string(),
-                        );
+                        let decl = text
+                            .trim()
+                            .to_string();
+                        if let Some(name) = &var.name {
+                            state_var_defs.push((
+                                name.name
+                                    .clone(),
+                                decl.clone(),
+                            ));
+                        }
+                        storage_vars.push(decl);
                     }
                 }
                 // File-level dependencies a function may reference — context only.
@@ -1241,8 +1593,45 @@ fn analyze_contract(source: &str) -> ContractSkeleton {
         functions,
         storage_layout: storage_vars.join("\n"),
         file_decls: decls.join("\n\n"),
+        slot_guide: build_slot_guide(&state_var_defs),
         signatures,
     }
+}
+
+/// Deterministic per-contract storage-slot derivations. Each state variable is
+/// emitted with the EXACT inline-assembly recipe for its slot, using `.slot`
+/// accessors (so solc resolves the slot index — no hardcoded numbers) and the
+/// canonical `keccak256(0x00, 0x40)` mapping derivation. Mapping depth is read from
+/// the declaration text. This is what stops a non-reasoning model from copying a
+/// retrieved pattern's incompatible (e.g. packed ERC721A) slot scheme.
+fn build_slot_guide(vars: &[(String, String)]) -> String {
+    if vars.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "EXACT STORAGE SLOTS FOR THIS CONTRACT — derive every slot with these recipes \
+         VERBATIM (use the `.slot` accessor; ignore any slot scheme from the retrieved patterns):\n",
+    );
+    for (name, decl) in vars {
+        let depth = decl
+            .matches("mapping(")
+            .count();
+        let line = match depth {
+            0 => format!(
+                "- {name} (value type): read sload({name}.slot), write sstore({name}.slot, v)"
+            ),
+            1 => format!(
+                "- {name}[k]: mstore(0x00, k); mstore(0x20, {name}.slot); let s := keccak256(0x00, 0x40)"
+            ),
+            2 => format!(
+                "- {name}[k1][k2]: mstore(0x00, k1); mstore(0x20, {name}.slot); let inner := keccak256(0x00, 0x40); mstore(0x00, k2); mstore(0x20, inner); let s := keccak256(0x00, 0x40)"
+            ),
+            _ => format!("- {name}: deep mapping — derive each level as keccak256(key ++ parentSlot)"),
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
 }
 
 fn detect_category_fallback(source: &str) -> Option<&'static str> {

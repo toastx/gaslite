@@ -77,7 +77,7 @@ pub async fn route(
     // The loop terminates inside the hook the moment the tool is called, so the
     // result is a cancellation error — the decision lives in `slot`.
     let _ = client
-        .agent(deepseek::DEEPSEEK_V4_FLASH)
+        .agent(crate::rig_agent::MODEL)
         .preamble(ROUTER_PROMPT)
         .context(skeleton)
         .temperature(0.0)
