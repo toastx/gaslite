@@ -424,3 +424,4 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         HookAction::cont()
     }
 }
+
