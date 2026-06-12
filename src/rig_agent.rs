@@ -19,6 +19,7 @@ use rig_core::{
 };
 use tracing::info;
 
+
 use crate::{retrieval::GasliteIndex, tools::FunctionForgeTool, utils::strip_code_fences};
 
 /// The single model id used by every agent (router, oneshot, per-function, verify).

@@ -8,6 +8,7 @@
 //! wrong storage-slot derivation that construction-gas measurement cannot see.
 //!
 //! One agent per function — these are generated concurrently (one thread each).
+//! //
 
 use rig_core::client::CompletionClient;
 use rig_core::completion::Prompt;
