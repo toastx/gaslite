@@ -19,6 +19,7 @@ use rig_core::{
 };
 use tracing::info;
 
+
 use crate::{retrieval::GasliteIndex, tools::FunctionForgeTool, utils::strip_code_fences};
 
 /// Max agent turns when the forge loop is active (1 generate + refinements).
@@ -336,3 +337,4 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         HookAction::cont()
     }
 }
+
