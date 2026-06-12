@@ -3,10 +3,15 @@
    "gaslite" light theme matching the app palette, a minimal Solidity Monarch
    grammar, and the hover-to-explain optimizations rebuilt as line-anchored
    decorations + a custom popover. */
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { loadMonaco } from "./monaco";
-import { ORIGINAL_SRC, OPTIMIZED_SRC, OPTIMIZATIONS, REASONS, type ReasonKey } from "./data";
+import { ORIGINAL_SRC, OPTIMIZATIONS, REASONS, type ReasonKey } from "./data";
 import type { Phase } from "./types";
+
+/** Imperative handle so the app can read the (user-edited) original source. */
+export interface DiffHandle {
+  getOriginal: () => string;
+}
 
 /* ---- one-time language + theme registration ---- */
 let glMonacoReady = false;
@@ -139,13 +144,20 @@ interface WhyState {
   top: number;
 }
 
-export function MonacoDiff({ phase }: { phase: Phase }) {
+export const MonacoDiff = forwardRef<DiffHandle, { phase: Phase; optimizedSrc?: string }>(function MonacoDiff(
+  { phase, optimizedSrc },
+  ref,
+) {
   const hostRef = useRef<HTMLDivElement>(null);
   const refs = useRef<any>({});
   const [ready, setReady] = useState(false);
   const [why, setWhy] = useState<WhyState | null>(null);
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+
+  useImperativeHandle(ref, () => ({
+    getOriginal: () => (refs.current.original ? refs.current.original.getValue() : ORIGINAL_SRC),
+  }));
 
   /* mount the diff editor once */
   useEffect(() => {
@@ -259,7 +271,9 @@ export function MonacoDiff({ phase }: { phase: Phase }) {
     };
 
     if (phase === "done") {
-      modified.setValue(OPTIMIZED_SRC);
+      // Optimized code comes from the live Gaslite server; fall back to mirroring
+      // the original if it's missing (shouldn't happen on a successful run).
+      modified.setValue(optimizedSrc ?? r.original.getValue());
       const whyByLine: Record<number, ReasonKey> = {};
       const decos: any[] = [];
       const flashes: any[] = [];
@@ -289,7 +303,7 @@ export function MonacoDiff({ phase }: { phase: Phase }) {
     }
     requestAnimationFrame(repaint);
     [60, 220, 500].forEach((t) => setTimeout(repaint, t));
-  }, [phase, ready]);
+  }, [phase, ready, optimizedSrc]);
 
   const w = why && REASONS[why.reason];
   return (
@@ -309,4 +323,4 @@ export function MonacoDiff({ phase }: { phase: Phase }) {
       )}
     </div>
   );
-}
+});
