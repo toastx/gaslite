@@ -19,12 +19,28 @@ use rig_core::{
 };
 use tracing::info;
 
+
 use crate::{retrieval::GasliteIndex, tools::FunctionForgeTool, utils::strip_code_fences};
+
+/// The single model id used by every agent (router, oneshot, per-function, verify).
+/// `deepseek-chat` is the **non-thinking** mode of `deepseek-v4-flash` — it skips the
+/// chain-of-thought that made generation 3-5x slower. One switch point for all agents.
+#[allow(deprecated)]
+pub const MODEL: &str = deepseek::DEEPSEEK_CHAT;
 
 /// Max agent turns when the forge loop is active (1 generate + refinements).
 const FORGE_MAX_TURNS: usize = 4;
-/// Number of retrieved pattern documents to inject as dynamic context.
-const CONTEXT_SAMPLES: usize = 6;
+/// Number of retrieved pattern documents to inject as dynamic context. Now actually
+/// honored by `GasliteIndex::top_n` (it ranks by score and truncates to this many).
+/// 4 balances coverage (a multi-function oneshot needs several patterns) against
+/// prefill cost; 1 starves the model, the old ~6 bloated the prompt.
+const CONTEXT_SAMPLES: usize = 4;
+
+/// Appended to generation prompts to cut  output tokens (generation time scales with
+/// emitted tokens): no comments, minimal whitespace, no prose around the code.
+const TERSE_OUTPUT: &str = "OUTPUT STYLE — emit TERSE code: NO comments anywhere in the \
+    assembly or Solidity, and minimal whitespace. Do not annotate, label, or explain the Yul. \
+    Correctness and the exact opcodes/selectors still matter — only drop comments and blank lines.";
 
 pub const SYSTEM_PROMPT: &str = "You are Gaslite, a gas optimization engine for Mantle L2 EVM contracts.\n\
     \n\
@@ -33,10 +49,16 @@ pub const SYSTEM_PROMPT: &str = "You are Gaslite, a gas optimization engine for 
     The RETRIEVED PATTERNS are your source of truth for YUL structure, opcodes, \
     and error selectors. Use them as templates:\n\
     - Keep the YUL opcodes, control flow, and error selectors exactly as shown\n\
-    - Adapt storage slot variable names and mapping key derivations to match \
-      the user contract's actual storage layout shown in STORAGE LAYOUT\n\
-    - For standard Solidity mappings, derive slots as: \
-      mstore(0x00, key), mstore(0x20, slot_number), keccak256(0x00, 0x40)\n\
+    - The retrieved patterns may assume a DIFFERENT storage layout (e.g. packed \
+      ERC721A/Solady). Take ONLY the technique from them (custom errors, inline log4 \
+      emission, read caching) — NEVER copy their storage slot scheme.\n\
+    - For EVERY storage access, use the EXACT SLOT recipes given under STORAGE LAYOUT \
+      verbatim — they use the `.slot` accessor and keccak256(0x00, 0x40). Do not invent \
+      slot arithmetic, offsets, or packed layouts the contract does not declare.\n\
+    - `public` state variables have compiler-generated getters that read the STANDARD \
+      slots. Any assembly write to a different slot (packed, offset, relocated) makes \
+      those getters silently return wrong data — an automatic behavioural failure. \
+      Keep every declaration and its layout exactly as-is; optimize only the access code.\n\
     - Replace require(condition, string) with the 4-byte custom error pattern: \
       mstore(0x00, 0xSELECTOR), revert(0x1c, 0x04)\n\
     - Do not invent YUL opcodes, selectors, or patterns not present in the retrieved patterns\n\
@@ -84,6 +106,7 @@ pub async fn optimize_function(
     client: &deepseek::Client,
     index: GasliteIndex,
     storage_layout: &str,
+    file_decls: &str,
     original: Arc<str>,
     fn_name: &str,
     fn_source: &str,
@@ -92,8 +115,9 @@ pub async fn optimize_function(
     use_forge: bool,
 ) -> Result<String, String> {
     let context = format!(
-        "STORAGE LAYOUT:\n{storage_layout}\n\n\
-         FUNCTION TO OPTIMIZE:\n```solidity\n{fn_source}\n```"
+        "STORAGE LAYOUT:\n{storage_layout}\n\n{}\
+         FUNCTION TO OPTIMIZE:\n```solidity\n{fn_source}\n```",
+        decls_block(file_decls)
     );
 
     let forge_step = if use_forge {
@@ -110,11 +134,12 @@ pub async fn optimize_function(
          observable behaviour and signature.\n\
          {forge_step}\n\
          Return ONLY the complete optimized function (signature + body) in a single ```solidity code \
-         block — no contract wrapper, no imports."
+         block — no contract wrapper, no imports.\n\
+         {TERSE_OUTPUT}"
     );
 
     let builder = client
-        .agent(deepseek::DEEPSEEK_V4_FLASH)
+        .agent(MODEL)
         .preamble(SYSTEM_PROMPT)
         .context(&context)
         .dynamic_context(CONTEXT_SAMPLES, index)
@@ -167,6 +192,69 @@ pub async fn optimize_function(
     }
 
     result.map_err(|e| format!("[{fn_name}] agent prompt failed: {e}"))
+}
+
+/// Render the file-level declarations block for agent context (empty when none).
+fn decls_block(file_decls: &str) -> String {
+    if file_decls
+        .trim()
+        .is_empty()
+    {
+        String::new()
+    } else {
+        format!(
+            "CONTRACT DECLARATIONS (structs / enums / custom errors / events / modifiers the code \
+             may reference — do not redefine or rename these):\n{file_decls}\n\n"
+        )
+    }
+}
+
+/// One-shot whole-contract optimization: a single LLM call that rewrites the entire
+/// contract. No `forge_verify` tool loop — the caller's whole-contract forge gate is
+/// the authority. This is the fast path the orchestrator picks for simple contracts.
+pub async fn optimize_oneshot(
+    client: &deepseek::Client,
+    index: GasliteIndex,
+    storage_layout: &str,
+    file_decls: &str,
+    contract_source: &str,
+) -> Result<String, String> {
+    let context = format!(
+        "STORAGE LAYOUT:\n{storage_layout}\n\n{}\
+         CONTRACT TO OPTIMIZE:\n```solidity\n{contract_source}\n```",
+        decls_block(file_decls)
+    );
+
+    let user = format!(
+        "Optimize the ENTIRE contract by applying the RETRIEVED PATTERNS as templates, \
+         adapting slot derivations and variable names to the contract's storage layout. Preserve \
+         every function's observable behaviour and signature, and keep all existing declarations. \
+         Return ONLY the complete optimized contract in a single ```solidity code block — no \
+         commentary, no explanations.\n\
+         {TERSE_OUTPUT}"
+    );
+
+    let hook = TimingHook::new("oneshot");
+    let result = client
+        .agent(MODEL)
+        .preamble(SYSTEM_PROMPT)
+        .context(&context)
+        .dynamic_context(CONTEXT_SAMPLES, index)
+        .temperature(0.1)
+        .max_tokens(8192)
+        .build()
+        .prompt(user)
+        .with_hook(hook.clone())
+        .max_turns(1)
+        .await;
+
+    let (turns, llm_total, tool_total) = hook.summary();
+    info!(
+        "  [oneshot] {} turn(s) | LLM {:.2?} | forge {:.2?}",
+        turns, llm_total, tool_total
+    );
+
+    result.map_err(|e| format!("[oneshot] agent prompt failed: {e}"))
 }
 
 // ── per-turn timing hook ──────────────────────────────────────────────────────
@@ -336,3 +424,4 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         HookAction::cont()
     }
 }
+

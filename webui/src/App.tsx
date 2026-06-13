@@ -1,10 +1,11 @@
 /* Gaslite IDE — top bar, the Monaco diff with idle/analyzing overlays, and the
    savings rail. */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { MODEL, TECHNIQUES, REASONS } from "./data";
-import { MonacoDiff } from "./MonacoDiff";
+import { MonacoDiff, type DiffHandle } from "./MonacoDiff";
 import { Rail } from "./Rail";
 import type { Phase } from "./types";
+import { optimizeContract, parseGas } from "./api";
 import brandLogo from "./gaslite-avatar.png";
 
 function OptimizeBtn({ phase, onOptimize, onReset }: { phase: Phase; onOptimize: () => void; onReset: () => void }) {
@@ -32,13 +33,32 @@ export function App() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [runCount, setRunCount] = useState(100000);
   const [fnIdx, setFnIdx] = useState(0);
+  const [optimized, setOptimized] = useState<string | undefined>();
+  const [analysis, setAnalysis] = useState<string>("");
+  const [error, setError] = useState<string | null>(null);
+  const diffRef = useRef<DiffHandle>(null);
   const done = phase === "done";
 
-  const optimize = () => {
+  const optimize = async () => {
+    setError(null);
     setPhase("analyzing");
-    setTimeout(() => setPhase("done"), 1600);
+    const source = diffRef.current?.getOriginal() ?? "";
+    try {
+      const res = await optimizeContract(source);
+      setOptimized(res.optimized_code);
+      setAnalysis(res.analysis);
+      setPhase("done");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setPhase("idle");
+    }
   };
-  const reset = () => setPhase("idle");
+  const reset = () => {
+    setPhase("idle");
+    setOptimized(undefined);
+    setAnalysis("");
+    setError(null);
+  };
 
   return (
     <>
@@ -80,11 +100,20 @@ export function App() {
             </div>
             <div className="ed-head">
               <span style={{ color: done ? "var(--accent-ink)" : "var(--ink-2)" }}>Optimized by Gaslite</span>
-              {done && <span className="pill-save">−{Math.round(MODEL.savedPct(runCount) * 100)}%</span>}
+              {done &&
+                (() => {
+                  const g = parseGas(analysis);
+                  const pct = g ? Math.round((g.saved / g.before) * 100) : Math.round(MODEL.savedPct(runCount) * 100);
+                  return (
+                    <span className="pill-save" title={analysis || undefined}>
+                      −{pct}% {g ? "deploy gas" : ""}
+                    </span>
+                  );
+                })()}
             </div>
           </div>
           <div className="diff-shell" style={{ position: "relative", flex: 1, overflow: "hidden" }}>
-            <MonacoDiff phase={phase} />
+            <MonacoDiff ref={diffRef} phase={phase} optimizedSrc={optimized} />
             {phase === "analyzing" && <div className="scan" />}
             {phase !== "done" && (
               <div className="ov" style={{ left: "50%" }}>
@@ -100,6 +129,12 @@ export function App() {
                         </span>
                       ))}
                     </div>
+                  </>
+                ) : error ? (
+                  <>
+                    <h3>Couldn’t reach Gaslite</h3>
+                    <p style={{ color: "var(--danger, #c5221f)" }}>{error}</p>
+                    <p>Edit the contract on the left and try again.</p>
                   </>
                 ) : (
                   <>
