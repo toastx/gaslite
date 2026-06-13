@@ -308,7 +308,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/admin/qdrant/reset",
             post(reset_collection),
         )
-        .with_state(state);
+        .with_state(state)
+        // Allow the browser-based web UI (different origin) to call the API.
+        .layer(cors_layer());
 
     spawn_pinger();
 
@@ -319,6 +321,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// CORS for the browser web UI. Permissive by default (public optimize API, no
+/// cookies/credentials); restrict to a comma-separated allowlist via
+/// `CORS_ALLOW_ORIGINS` (e.g. "https://gaslite.example,https://foo.bar").
+fn cors_layer() -> tower_http::cors::CorsLayer {
+    use tower_http::cors::{Any, CorsLayer};
+    let base = CorsLayer::new()
+        .allow_methods(Any)
+        .allow_headers(Any);
+    match std::env::var("CORS_ALLOW_ORIGINS") {
+        Ok(list) if !list.trim().is_empty() => {
+            let origins: Vec<axum::http::HeaderValue> = list
+                .split(',')
+                .filter_map(|o| {
+                    o.trim()
+                        .parse()
+                        .ok()
+                })
+                .collect();
+            base.allow_origin(origins)
+        }
+        _ => base.allow_origin(Any),
+    }
 }
 
 fn spawn_pinger() {
