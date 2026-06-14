@@ -103,10 +103,13 @@ export function App() {
               {done &&
                 (() => {
                   const g = parseGas(analysis);
-                  const pct = g ? Math.round((g.saved / g.before) * 100) : Math.round(MODEL.savedPct(runCount) * 100);
+                  const realGas = g && g.before > 0;
+                  const pct = realGas
+                    ? Math.round((g.saved / g.before) * 100)
+                    : Math.round(MODEL.savedPct(runCount) * 100);
                   return (
                     <span className="pill-save" title={analysis || undefined}>
-                      −{pct}% {g ? "deploy gas" : ""}
+                      −{pct}% {realGas ? "deploy gas" : ""}
                     </span>
                   );
                 })()}
