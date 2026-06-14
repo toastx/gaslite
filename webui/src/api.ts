@@ -26,15 +26,17 @@ export function parseGas(analysis: string): GasFigures | null {
 }
 
 export async function optimizeContract(contractSource: string, signal?: AbortSignal): Promise<OptimizeResponse> {
+  const source = contractSource.trim();
+  if (!source) throw new Error("Contract source is empty — type or paste a contract on the left.");
   const res = await fetch(`${API_BASE}/api/optimize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contract_source: contractSource }),
+    body: JSON.stringify({ contract_source: source }),
     signal,
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
-    throw new Error(`Gaslite server ${res.status}: ${detail.slice(0, 200) || res.statusText}`);
+    throw new Error(`Gaslite server ${res.status}: ${detail.slice(0, 300) || res.statusText}`);
   }
   return (await res.json()) as OptimizeResponse;
 }

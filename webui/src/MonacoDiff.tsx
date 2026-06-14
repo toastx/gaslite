@@ -156,7 +156,10 @@ export const MonacoDiff = forwardRef<DiffHandle, { phase: Phase; optimizedSrc?: 
   phaseRef.current = phase;
 
   useImperativeHandle(ref, () => ({
-    getOriginal: () => (refs.current.original ? refs.current.original.getValue() : ORIGINAL_SRC),
+    getOriginal: () => {
+      const v = refs.current.original ? refs.current.original.getValue() : "";
+      return v.trim() ? v : ORIGINAL_SRC;
+    },
   }));
 
   /* mount the diff editor once */
