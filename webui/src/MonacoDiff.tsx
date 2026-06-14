@@ -156,10 +156,10 @@ export const MonacoDiff = forwardRef<DiffHandle, { phase: Phase; optimizedSrc?: 
   phaseRef.current = phase;
 
   useImperativeHandle(ref, () => ({
-    getOriginal: () => {
-      const v = refs.current.original ? refs.current.original.getValue() : "";
-      return v.trim() ? v : ORIGINAL_SRC;
-    },
+    // Return the editor's raw value (blank included) — empty-source validation
+    // lives in optimizeContract, so a deliberately-cleared editor surfaces a clear
+    // error rather than silently optimizing the demo contract.
+    getOriginal: () => (refs.current.original ? refs.current.original.getValue() : ""),
   }));
 
   /* mount the diff editor once */
