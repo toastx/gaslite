@@ -7,6 +7,12 @@ declare module "*.svg" {
   export default src;
 }
 
+/* Bun build inlines `import.meta.env`. Declare the specific keys we read and merge
+   into the lib `ImportMeta` (interface declaration merging) rather than overriding
+   it, so the rest of `import.meta` keeps its real types. */
+interface ImportMetaEnv {
+  readonly VITE_GASLITE_API?: string;
+}
 interface ImportMeta {
-  readonly env?: Record<string, string | undefined>;
+  readonly env?: ImportMetaEnv;
 }
