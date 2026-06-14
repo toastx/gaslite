@@ -7,7 +7,10 @@
 //! a shared `OnceCell`, so the composed search runs **once** per request even
 //! though `dynamic_context` re-fetches on every agent turn.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use qdrant_client::{
     Qdrant,
@@ -117,72 +120,83 @@ impl GasliteIndex {
             .map(|c| TOKEN_CATS.contains(&c))
             .unwrap_or(false);
 
-        // 2. Pattern hits: token contracts get category-filtered + 1 general; everything else gets
-        //    a plain top-3.
-        let pattern_hits = if is_token {
+        // 2. All Qdrant searches run CONCURRENTLY — they only depend on the
+        //    embedding, so there is no reason to serialize the round-trips.
+        //    Token contracts: category-filtered (2) + general (1) + antipattern (2).
+        //    Everything else: plain top-3 + antipattern (2).
+        let anti_search = SearchPointsBuilder::new(COLLECTION, qvec.clone(), 2)
+            .with_payload(true)
+            .filter(QFilter::must([Condition::matches(
+                "type",
+                "antipattern".to_string(),
+            )]));
+        let (pattern_hits, anti_hits) = if is_token {
             let cat = self
                 .category
                 .unwrap();
-            let cat_r = self
-                .qdrant
-                .search_points(
-                    SearchPointsBuilder::new(COLLECTION, qvec.clone(), 2)
-                        .with_payload(true)
-                        .filter(QFilter::must([
-                            Condition::matches("category", cat.to_string()),
-                        ])),
-                )
-                .await
-                .map_err(|e| {
-                    VectorStoreError::DatastoreError(
-                        e.to_string()
-                            .into(),
-                    )
-                })?;
-
-            let gen_r = self
-                .qdrant
-                .search_points(
-                    SearchPointsBuilder::new(COLLECTION, qvec.clone(), 1)
-                        .with_payload(true)
-                        .filter(QFilter::must_not(
-                            TOKEN_CATS
-                                .iter()
-                                .map(|c| Condition::matches("category", c.to_string()))
-                                .collect::<Vec<_>>(),
-                        )),
-                )
-                .await
-                .map_err(|e| {
-                    VectorStoreError::DatastoreError(
-                        e.to_string()
-                            .into(),
-                    )
-                })?;
-
-            let mut combined = cat_r.result;
-            combined.extend(gen_r.result);
-            combined
+            let (cat_r, gen_r, anti_r) = tokio::join!(
+                self.qdrant
+                    .search_points(
+                        SearchPointsBuilder::new(COLLECTION, qvec.clone(), 2)
+                            .with_payload(true)
+                            .filter(QFilter::must([Condition::matches(
+                                "category",
+                                cat.to_string()
+                            )])),
+                    ),
+                self.qdrant
+                    .search_points(
+                        SearchPointsBuilder::new(COLLECTION, qvec.clone(), 1)
+                            .with_payload(true)
+                            .filter(QFilter::must_not(
+                                TOKEN_CATS
+                                    .iter()
+                                    .map(|c| Condition::matches("category", c.to_string()))
+                                    .collect::<Vec<_>>(),
+                            )),
+                    ),
+                self.qdrant
+                    .search_points(anti_search),
+            );
+            let mut combined = cat_r
+                .map_err(qerr)?
+                .result;
+            combined.extend(
+                gen_r
+                    .map_err(qerr)?
+                    .result,
+            );
+            (
+                combined,
+                anti_r
+                    .map_err(qerr)?
+                    .result,
+            )
         } else {
-            self.qdrant
-                .search_points(
-                    SearchPointsBuilder::new(COLLECTION, qvec.clone(), 3).with_payload(true),
-                )
-                .await
-                .map_err(|e| {
-                    VectorStoreError::DatastoreError(
-                        e.to_string()
-                            .into(),
-                    )
-                })?
-                .result
+            let (plain_r, anti_r) = tokio::join!(
+                self.qdrant
+                    .search_points(
+                        SearchPointsBuilder::new(COLLECTION, qvec.clone(), 3).with_payload(true),
+                    ),
+                self.qdrant
+                    .search_points(anti_search),
+            );
+            (
+                plain_r
+                    .map_err(qerr)?
+                    .result,
+                anti_r
+                    .map_err(qerr)?
+                    .result,
+            )
         };
 
-        let mut out: Vec<Hit> = Vec::new();
+        // 3. Collect candidate ids (deduped across sources, in injection order)
+        //    together with how each was found — which decides its score + format.
         let mut seen: HashSet<String> = HashSet::new();
-
+        let mut candidates: Vec<(String, HitKind)> = Vec::new();
         for hit in pattern_hits {
-            let Some(id) = hit
+            if let Some(id) = hit
                 .payload
                 .get("pattern_id")
                 .map(|v| {
@@ -190,65 +204,13 @@ impl GasliteIndex {
                         .trim()
                         .replace('"', "")
                 })
-            else {
-                continue;
-            };
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let rows = self
-                .db
-                .query(
-                    "SELECT title, explanation, yul_optimized, risk_level, when_not_to_apply \
-                     FROM optimization_patterns WHERE id = ?",
-                    vec![TursoArg::Text(id.clone())],
-                )
-                .await
-                .map_err(|e| VectorStoreError::DatastoreError(e.into()))?;
-            if let Some(row) = rows.first() {
-                let get = |k: &str| {
-                    row.get(k)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                };
-                let text = format!(
-                    "PATTERN ID: {}\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
-                    id,
-                    get("title"),
-                    get("explanation"),
-                    get("yul_optimized"),
-                    get("risk_level"),
-                    get("when_not_to_apply"),
-                );
-                out.push((hit.score as f64, id, text));
+                && seen.insert(id.clone())
+            {
+                candidates.push((id, HitKind::Pattern(hit.score as f64)));
             }
         }
-
-        // 3. Antipattern hits — always 2, filtered by type.
-        let anti_hits = self
-            .qdrant
-            .search_points(
-                SearchPointsBuilder::new(COLLECTION, qvec, 2)
-                    .with_payload(true)
-                    .filter(QFilter::must([
-                        Condition::matches(
-                            "type",
-                            "antipattern".to_string(),
-                        ),
-                    ])),
-            )
-            .await
-            .map_err(|e| {
-                VectorStoreError::DatastoreError(
-                    e.to_string()
-                        .into(),
-                )
-            })?
-            .result;
-
         for hit in anti_hits {
-            let Some(id) = hit
+            if let Some(id) = hit
                 .payload
                 .get("pattern_id")
                 .map(|v| {
@@ -256,78 +218,105 @@ impl GasliteIndex {
                         .trim()
                         .replace('"', "")
                 })
-            else {
-                continue;
-            };
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let rows = self
-                .db
-                .query(
-                    "SELECT title, explanation, solidity_before, yul_optimized \
-                     FROM optimization_patterns WHERE id = ?",
-                    vec![TursoArg::Text(id.clone())],
-                )
-                .await
-                .map_err(|e| VectorStoreError::DatastoreError(e.into()))?;
-            if let Some(row) = rows.first() {
-                let get = |k: &str| {
-                    row.get(k)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                };
-                let text = format!(
-                    "ANTIPATTERN ID: {}\nTitle: {}\nExplanation: {}\nWrong:\n{}\nCorrect:\n{}",
-                    id,
-                    get("title"),
-                    get("explanation"),
-                    get("solidity_before"),
-                    get("yul_optimized"),
-                );
-                out.push((hit.score as f64, id, text));
+                && seen.insert(id.clone())
+            {
+                candidates.push((id, HitKind::Anti(hit.score as f64)));
             }
         }
-
-        // 4. Structural ("Seeker") matches — deterministic, name-agnostic. The second signal
-        //    alongside embedding search (GasAgent-style dual retrieval).
         let struct_ids = self
             .matcher
             .match_function(&self.query);
-        let mut struct_added = 0usize;
         for id in &struct_ids {
-            if !seen.insert(id.clone()) {
-                continue;
+            if seen.insert(id.clone()) {
+                candidates.push((id.clone(), HitKind::Structural));
             }
-            let rows = self
-                .db
-                .query(
-                    "SELECT title, explanation, yul_optimized, risk_level, when_not_to_apply \
-                     FROM optimization_patterns WHERE id = ?",
-                    vec![TursoArg::Text(id.clone())],
-                )
-                .await
-                .map_err(|e| VectorStoreError::DatastoreError(e.into()))?;
-            if let Some(row) = rows.first() {
-                let get = |k: &str| {
-                    row.get(k)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                };
-                let text = format!(
-                    "PATTERN ID: {} (structural match)\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
-                    id,
-                    get("title"),
-                    get("explanation"),
-                    get("yul_optimized"),
-                    get("risk_level"),
-                    get("when_not_to_apply"),
-                );
+        }
+
+        if candidates.is_empty() {
+            info!("  [{}] retrieval: 0 patterns", self.label);
+            return Ok(vec![]);
+        }
+
+        // 4. ONE batched Turso fetch for every candidate (previously one HTTP
+        //    round-trip per id — the dominant retrieval cost).
+        let placeholders = vec!["?"; candidates.len()].join(",");
+        let sql = format!(
+            "SELECT id, title, explanation, yul_optimized, risk_level, when_not_to_apply, \
+             solidity_before FROM optimization_patterns WHERE id IN ({placeholders})"
+        );
+        let args: Vec<TursoArg> = candidates
+            .iter()
+            .map(|(id, _)| TursoArg::Text(id.clone()))
+            .collect();
+        let rows = self
+            .db
+            .query(&sql, args)
+            .await
+            .map_err(|e| VectorStoreError::DatastoreError(e.into()))?;
+        let mut by_id: HashMap<String, &HashMap<String, serde_json::Value>> = HashMap::new();
+        for row in &rows {
+            if let Some(id) = row
+                .get("id")
+                .and_then(|v| v.as_str())
+            {
+                by_id.insert(id.to_string(), row);
+            }
+        }
+
+        // 5. Format each candidate from its row.
+        let mut out: Vec<Hit> = Vec::new();
+        let mut struct_added = 0usize;
+        for (id, kind) in candidates {
+            let Some(row) = by_id.get(&id) else { continue };
+            let get = |k: &str| {
+                row.get(k)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            match kind {
+                HitKind::Pattern(score) => out.push((
+                    score,
+                    id.clone(),
+                    format!(
+                        "PATTERN ID: {}\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
+                        id,
+                        get("title"),
+                        get("explanation"),
+                        get("yul_optimized"),
+                        get("risk_level"),
+                        get("when_not_to_apply"),
+                    ),
+                )),
+                HitKind::Anti(score) => out.push((
+                    score,
+                    id.clone(),
+                    format!(
+                        "ANTIPATTERN ID: {}\nTitle: {}\nExplanation: {}\nWrong:\n{}\nCorrect:\n{}",
+                        id,
+                        get("title"),
+                        get("explanation"),
+                        get("solidity_before"),
+                        get("yul_optimized"),
+                    ),
+                )),
                 // Deterministic hits get top score.
-                out.push((1.0, id.clone(), text));
-                struct_added += 1;
+                HitKind::Structural => {
+                    out.push((
+                        1.0,
+                        id.clone(),
+                        format!(
+                            "PATTERN ID: {} (structural match)\nTitle: {}\nExplanation: {}\nOptimized YUL:\n{}\nRisk: {}\nDo NOT apply when: {}",
+                            id,
+                            get("title"),
+                            get("explanation"),
+                            get("yul_optimized"),
+                            get("risk_level"),
+                            get("when_not_to_apply"),
+                        ),
+                    ));
+                    struct_added += 1;
+                }
             }
         }
 
@@ -348,6 +337,21 @@ impl GasliteIndex {
     }
 }
 
+/// Which retrieval signal produced a candidate — decides score and doc format.
+enum HitKind {
+    Pattern(f64),
+    Anti(f64),
+    Structural,
+}
+
+/// Map a Qdrant error into rig's vector-store error.
+fn qerr<E: std::fmt::Display>(e: E) -> VectorStoreError {
+    VectorStoreError::DatastoreError(
+        e.to_string()
+            .into(),
+    )
+}
+
 impl VectorStoreIndex for GasliteIndex {
     type Filter = Filter<serde_json::Value>;
 
@@ -356,11 +360,24 @@ impl VectorStoreIndex for GasliteIndex {
     // same composed result instead of re-embedding and re-searching.
     async fn top_n<T: for<'a> Deserialize<'a> + Send>(
         &self,
-        _req: VectorSearchRequest<Self::Filter>,
+        req: VectorSearchRequest<Self::Filter>,
     ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
-        self.retrieve()
-            .await?
-            .into_iter()
+        // Honor the caller's requested sample count (rig injects ALL docs we return,
+        // so we must truncate here). Rank by score descending first, so the highest-
+        // signal patterns survive: structural "Seeker" matches (score 1.0) and the
+        // best embedding hits stay; weak/antipattern hits drop first.
+        let n = req.samples() as usize;
+        let mut hits = self
+            .retrieve()
+            .await?;
+        hits.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if n > 0 {
+            hits.truncate(n);
+        }
+        hits.into_iter()
             .map(|(score, id, text)| {
                 let doc = json!({ "pattern_id": id.clone(), "context": text });
                 let val = serde_json::from_value::<T>(doc)?;
