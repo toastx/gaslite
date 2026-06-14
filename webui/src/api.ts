@@ -20,6 +20,7 @@ export interface GasFigures {
 /** Pull "construction gas 613901 → 346350 (saved 267551)" out of `analysis`. */
 export function parseGas(analysis: string): GasFigures | null {
   const m = analysis.match(/gas\s+([\d,]+)\s*(?:→|->)\s*([\d,]+)\s*\(saved\s+([\d,]+)/i);
+  // (all three numeric groups use the same comma-tolerant pattern)
   if (!m) return null;
   const n = (s: string) => Number(s.replace(/,/g, ""));
   return { before: n(m[1]), after: n(m[2]), saved: n(m[3]) };
