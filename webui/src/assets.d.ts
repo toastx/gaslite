@@ -6,3 +6,7 @@ declare module "*.svg" {
   const src: string;
   export default src;
 }
+
+interface ImportMeta {
+  readonly env?: Record<string, string | undefined>;
+}
