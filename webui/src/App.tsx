@@ -5,7 +5,7 @@ import { MODEL, TECHNIQUES, REASONS } from "./data";
 import { MonacoDiff, type DiffHandle } from "./MonacoDiff";
 import { Rail } from "./Rail";
 import type { Phase } from "./types";
-import { optimizeContract, parseGas } from "./api";
+import { optimizeContract, parseGas, type FunctionGas } from "./api";
 import brandLogo from "./gaslite-avatar.png";
 
 function OptimizeBtn({ phase, onOptimize, onReset }: { phase: Phase; onOptimize: () => void; onReset: () => void }) {
@@ -40,6 +40,7 @@ export function App() {
   const [gasAfter, setGasAfter] = useState<number | undefined>();
   const [gasSaved, setGasSaved] = useState<number | undefined>();
   const [patterns, setPatterns] = useState<string[]>([]);
+  const [fnGas, setFnGas] = useState<FunctionGas[]>([]);
   const diffRef = useRef<DiffHandle>(null);
   const done = phase === "done";
 
@@ -65,6 +66,7 @@ export function App() {
       setGasAfter(res.gas_after);
       setGasSaved(res.gas_saved);
       setPatterns(res.suggested_patterns);
+      setFnGas(res.per_function_gas ?? []);
       setPhase("done");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -79,6 +81,7 @@ export function App() {
     setGasAfter(undefined);
     setGasSaved(undefined);
     setPatterns([]);
+    setFnGas([]);
     setError(null);
   };
 
@@ -186,6 +189,7 @@ export function App() {
             gasAfter={gasAfter}
             gasSaved={gasSaved}
             patterns={patterns}
+            fnGas={fnGas}
             analysis={analysis}
           />
         ) : (

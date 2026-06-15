@@ -4,6 +4,14 @@
 
 const API_BASE = import.meta.env?.VITE_GASLITE_API?.replace(/\/$/, "") ?? "https://gaslite.onrender.com";
 
+/** Real per-function runtime gas (original vs optimized), from forge's gas report. */
+export interface FunctionGas {
+  name: string;
+  gas_original?: number;
+  gas_optimized?: number;
+  gas_saved?: number;
+}
+
 export interface OptimizeResponse {
   analysis: string;
   suggested_patterns: string[];
@@ -14,6 +22,8 @@ export interface OptimizeResponse {
   gas_after?: number;
   /** Gas saved (positive = improvement) — present only when forge verified. */
   gas_saved?: number;
+  /** Per-function runtime gas — present only on an accepted, forge-verified rewrite. */
+  per_function_gas?: FunctionGas[];
 }
 
 /** Construction-gas figures parsed out of the `analysis` string when present. */

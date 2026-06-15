@@ -32,6 +32,17 @@ pub struct VerifyResponse {
     pub(crate) forge_output: String,
 }
 
+/// Real per-function runtime gas, original vs optimized, parsed from forge's
+/// `--gas-report` (avg over the differential test calls — both instances are
+/// exercised with identical arguments, so the comparison is apples-to-apples).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct FunctionGas {
+    pub name: String,
+    pub gas_original: Option<u64>,
+    pub gas_optimized: Option<u64>,
+    pub gas_saved: Option<i64>,
+}
+
 // ── handler ───────────────────────────────────────────────────────────────────
 pub async fn verify_contract(
     Json(payload): Json<VerifyRequest>
@@ -492,6 +503,8 @@ pub struct EquivResult {
     pub gas_original: Option<u64>,
     pub gas_optimized: Option<u64>,
     pub gas_saved: Option<i64>,
+    /// Real per-function runtime gas (original vs optimized), from `--gas-report`.
+    pub per_function_gas: Vec<FunctionGas>,
     pub forge_output: String,
 }
 
@@ -629,6 +642,10 @@ fn equivalence_inner(
             .unwrap(),
         "--fork-url",
         &mantle_rpc,
+        // --gas-report adds a per-function gas table for BOTH contracts. Each
+        // function is called identically on `o` (original) and `p` (optimized)
+        // by the differential tests, so the avg columns are directly comparable.
+        "--gas-report",
         "-vv",
     ]);
     let test_run = run_with_timeout(
@@ -692,6 +709,16 @@ fn equivalence_inner(
         _ => None,
     };
 
+    // Real per-function runtime gas from the --gas-report table (original vs the
+    // renamed optimized contract).
+    let per_function_gas = parse_gas_report(&stdout, &orig_name, &opt_name);
+    if !per_function_gas.is_empty() {
+        info!(
+            "  forge equivalence: per-function gas for {} function(s)",
+            per_function_gas.len()
+        );
+    }
+
     let all_passed = failed.is_empty() && valid_count > 0;
     info!(
         "  forge equivalence: {} | valid {}/{} | genuine failures: {:?} | broken tests: {:?} | gas saved={:?}",
@@ -714,8 +741,122 @@ fn equivalence_inner(
         gas_original,
         gas_optimized,
         gas_saved,
+        per_function_gas,
         forge_output: combined,
     })
+}
+
+/// Split one gas-report line into trimmed, non-empty cells. Foundry has shipped
+/// several table styles (old `│`/`┆` box-drawing, newer `|`/`+`); normalizing both
+/// vertical separators to `|` makes the parser version-tolerant.
+fn gas_report_cells(line: &str) -> Vec<String> {
+    line.replace('┆', "|")
+        .replace('│', "|")
+        .split('|')
+        .map(|c| {
+            c.trim()
+                .to_string()
+        })
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// Parse `forge test --gas-report` into per-function avg gas for the original and
+/// optimized contracts, paired by function name. Functions appear only if the
+/// differential tests called them; getters called for assertions are included too —
+/// the caller filters to the real optimization targets.
+fn parse_gas_report(
+    output: &str,
+    orig_name: &str,
+    opt_name: &str,
+) -> Vec<FunctionGas> {
+    use std::collections::HashMap;
+    let mut orig: HashMap<String, u64> = HashMap::new();
+    let mut opt: HashMap<String, u64> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    // Which contract's section we are currently inside (matched against the two
+    // names we care about; other contracts are ignored).
+    let mut current: Option<String> = None;
+
+    for line in output.lines() {
+        let cells = gas_report_cells(line);
+        if cells.is_empty() {
+            continue;
+        }
+
+        // Contract header row: a cell like "src/Original.sol:RewardPool contract".
+        if let Some(h) = cells
+            .iter()
+            .find(|c| c.contains(".sol:") && c.ends_with("contract"))
+        {
+            let name = h
+                .rsplit(':')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches("contract")
+                .trim()
+                .to_string();
+            current = Some(name);
+            continue;
+        }
+
+        // Function row: [name, min, avg, median, max, #calls]. Require the four
+        // stat columns to be numeric so headers/borders/deployment rows are skipped.
+        if cells.len() >= 6 && !cells[0].eq_ignore_ascii_case("Function Name") {
+            let stats: Vec<Option<u64>> = cells[1..5]
+                .iter()
+                .map(|c| {
+                    c.replace(',', "")
+                        .parse::<u64>()
+                        .ok()
+                })
+                .collect();
+            if stats
+                .iter()
+                .all(|n| n.is_some())
+            {
+                let fname = cells[0].clone();
+                let avg = stats[1].unwrap(); // cells[2] = avg column
+                match current.as_deref() {
+                    Some(c) if c == orig_name => {
+                        if !orig.contains_key(&fname) && !opt.contains_key(&fname) {
+                            order.push(fname.clone());
+                        }
+                        orig.insert(fname, avg);
+                    }
+                    Some(c) if c == opt_name => {
+                        if !orig.contains_key(&fname) && !opt.contains_key(&fname) {
+                            order.push(fname.clone());
+                        }
+                        opt.insert(fname, avg);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    order
+        .into_iter()
+        .map(|name| {
+            let go = orig
+                .get(&name)
+                .copied();
+            let gp = opt
+                .get(&name)
+                .copied();
+            let saved = match (go, gp) {
+                (Some(b), Some(a)) => Some(b as i64 - a as i64),
+                _ => None,
+            };
+            FunctionGas {
+                name,
+                gas_original: go,
+                gas_optimized: gp,
+                gas_saved: saved,
+            }
+        })
+        .collect()
 }
 
 /// Group forge's `[PASS]`/`[FAIL...]` result lines by test suite. Suite headers

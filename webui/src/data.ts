@@ -108,6 +108,39 @@ export const MODEL = {
   gasToUsd: (g: number) => MODEL.gasToMnt(g) * mntUsd,
 };
 
+/* A cost-projection model: cumulative gas = deploy + n · perRun, for original and
+   optimized. The static MODEL above is the demo fallback; `makeModel` builds one
+   from real forge-measured numbers so the simulation graph plots actual data. */
+export interface SimModel {
+  deployBefore: number;
+  deployAfter: number;
+  perRunBefore: number;
+  perRunAfter: number;
+  cumBefore: (n: number) => number;
+  cumAfter: (n: number) => number;
+  savedGas: (n: number) => number;
+  savedPct: (n: number) => number;
+}
+
+export function makeModel(
+  deployBefore: number,
+  deployAfter: number,
+  perRunBefore: number,
+  perRunAfter: number,
+): SimModel {
+  const m: SimModel = {
+    deployBefore,
+    deployAfter,
+    perRunBefore,
+    perRunAfter,
+    cumBefore: (n) => deployBefore + n * perRunBefore,
+    cumAfter: (n) => deployAfter + n * perRunAfter,
+    savedGas: (n) => m.cumBefore(n) - m.cumAfter(n),
+    savedPct: (n) => (m.cumBefore(n) > 0 ? m.savedGas(n) / m.cumBefore(n) : 0),
+  };
+  return m;
+}
+
 /* simulation presets (run counts) */
 export interface Preset {
   label: string;

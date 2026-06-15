@@ -160,6 +160,10 @@ struct OptimizeResponse {
     /// Gas saved (original − optimized). Positive = improvement.
     #[serde(skip_serializing_if = "Option::is_none")]
     gas_saved: Option<i64>,
+    /// Real per-function runtime gas (original vs optimized), from forge's gas
+    /// report. Empty when forge is unavailable or no rewrite was verified.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    per_function_gas: Vec<forge::FunctionGas>,
 }
 
 #[derive(Deserialize)]
@@ -1226,6 +1230,8 @@ async fn optimize_contract(
     let mut run_gas_original: Option<u64> = None;
     let mut run_gas_optimized: Option<u64> = None;
     let mut run_gas_saved: Option<i64> = None;
+    // Real per-function runtime gas (set only on an accepted, forge-verified rewrite).
+    let mut run_fn_gas: Vec<forge::FunctionGas> = Vec::new();
     if optimized_code == payload.contract_source {
         // No rewrite was produced (agent failure / nothing changed) — verifying
         // the original against itself would waste ~seconds of forge + LLM time.
@@ -1271,6 +1277,23 @@ async fn optimize_contract(
                 run_gas_original = er.gas_original;
                 run_gas_optimized = er.gas_optimized;
                 run_gas_saved = er.gas_saved;
+                // Keep only the real optimization targets (drop getters the
+                // differential tests called for assertions).
+                let targets: std::collections::HashSet<&str> = verify_targets
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+                run_fn_gas = er
+                    .per_function_gas
+                    .iter()
+                    .filter(|f| {
+                        targets.contains(
+                            f.name
+                                .as_str(),
+                        )
+                    })
+                    .cloned()
+                    .collect();
                 if !er
                     .invalid
                     .is_empty()
@@ -1436,6 +1459,7 @@ async fn optimize_contract(
         gas_before: run_gas_original,
         gas_after: run_gas_optimized,
         gas_saved: run_gas_saved,
+        per_function_gas: run_fn_gas,
     };
 
     if cacheable {

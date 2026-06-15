@@ -1,7 +1,7 @@
 /* Gaslite — UI primitives: formatting helpers, a count-up hook, animated
    number, donut, bar meter and the log-log savings graph. */
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { MODEL } from "./data";
+import { MODEL, type SimModel } from "./data";
 
 /* ---------- formatting ---------- */
 export function fmt(n: number): string {
@@ -152,7 +152,19 @@ export function BarMeter({ before, after, run }: { before: number; after: number
 }
 
 /* ---------- log-log savings graph ---------- */
-export function SavingsGraph({ runCount, run, width = 300, height = 168 }: { runCount: number; run?: boolean; width?: number; height?: number }) {
+export function SavingsGraph({
+  runCount,
+  run,
+  width = 300,
+  height = 168,
+  model = MODEL,
+}: {
+  runCount: number;
+  run?: boolean;
+  width?: number;
+  height?: number;
+  model?: Pick<SimModel, "cumBefore" | "cumAfter">;
+}) {
   const padL = 46,
     padR = 12,
     padT = 14,
@@ -170,16 +182,16 @@ export function SavingsGraph({ runCount, run, width = 300, height = 168 }: { run
       b: string[] = [];
     for (let i = 0; i <= 48; i++) {
       const n = Math.pow(10, (i / 48) * logMax) - 1;
-      a.push(`${xOf(n).toFixed(1)},${yOf(MODEL.cumBefore(n)).toFixed(1)}`);
-      b.push(`${xOf(n).toFixed(1)},${yOf(MODEL.cumAfter(n)).toFixed(1)}`);
+      a.push(`${xOf(n).toFixed(1)},${yOf(model.cumBefore(n)).toFixed(1)}`);
+      b.push(`${xOf(n).toFixed(1)},${yOf(model.cumAfter(n)).toFixed(1)}`);
     }
     return { before: a.join(" "), after: b.join(" ") };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [width, height]);
+  }, [width, height, model]);
 
   const mx = xOf(runCount);
-  const myB = yOf(MODEL.cumBefore(runCount));
-  const myA = yOf(MODEL.cumAfter(runCount));
+  const myB = yOf(model.cumBefore(runCount));
+  const myA = yOf(model.cumAfter(runCount));
   const xticks = [1, 10, 100, 1000, 10000, 100000, 1000000];
   const xlab = ["1", "10", "100", "1K", "10K", "100K", "1M"];
   const yticks = [6, 7, 8, 9, 10, 11];
