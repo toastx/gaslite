@@ -151,6 +151,15 @@ struct OptimizeResponse {
     analysis: String,
     suggested_patterns: Vec<String>,
     optimized_code: String,
+    /// Construction gas of the original contract (set only when forge verified).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gas_before: Option<u64>,
+    /// Construction gas of the optimized contract (set only when forge verified).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gas_after: Option<u64>,
+    /// Gas saved (original − optimized). Positive = improvement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gas_saved: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1424,6 +1433,9 @@ async fn optimize_contract(
         analysis,
         suggested_patterns,
         optimized_code,
+        gas_before: run_gas_original,
+        gas_after: run_gas_optimized,
+        gas_saved: run_gas_saved,
     };
 
     if cacheable {

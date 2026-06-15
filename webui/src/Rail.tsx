@@ -1,6 +1,6 @@
-/* Gaslite — savings rail: headline donut, deploy/per-call meters, estimated
-   cost saved and a live gas/cost simulation. */
-import { MODEL, FUNCS, PRESETS } from "./data";
+/* Gaslite — savings rail: headline summary, deploy meter, patterns applied,
+   estimated cost saved and a live gas/cost simulation. */
+import { MODEL, PRESETS } from "./data";
 import { AnimatedNum, BarMeter, SavingsGraph, fmt, fmtGas, fmtMnt } from "./lib";
 import logo from "./gaslite-mark-white.png";
 
@@ -8,28 +8,57 @@ interface RailProps {
   done: boolean;
   runCount: number;
   setRunCount: (n: number) => void;
-  fnIdx: number;
-  setFnIdx: (i: number) => void;
   mntUsd: number;
+  gasBefore?: number;
+  gasAfter?: number;
+  gasSaved?: number;
+  patterns?: string[];
+  analysis?: string;
 }
 
-export function Rail({ done, runCount, setRunCount, fnIdx, setFnIdx, mntUsd }: RailProps) {
-  const savedGas = MODEL.savedGas(runCount);
-  const savedPct = MODEL.savedPct(runCount) * 100;
-  const mnt = MODEL.gasToMnt(savedGas),
-    usd = mnt * mntUsd;
-  const fn = FUNCS[fnIdx]!,
-    fnPct = (1 - fn.after / fn.before) * 100;
-  const dep = MODEL.deploy,
-    depPct = (1 - dep.after / dep.before) * 100;
+/** Convert a knowledge-base pattern slug to a readable label.
+ *  e.g. "erc721-calldata-array-001" → "calldata array" */
+function patternLabel(id: string): string {
+  return id
+    .replace(/^(erc\d+|evm|mantle|general)-/i, "")
+    .replace(/-\d+$/, "")
+    .replace(/-/g, " ");
+}
 
-  // slider position from runCount (log)
+export function Rail({
+  done,
+  runCount,
+  setRunCount,
+  mntUsd,
+  gasBefore,
+  gasAfter,
+  gasSaved,
+  patterns = [],
+  analysis = "",
+}: RailProps) {
+  // Use real forge-measured deploy gas when available, fall back to demo model.
+  const realDeploy = gasBefore != null && gasAfter != null;
+  const deployBefore = realDeploy ? gasBefore! : MODEL.deploy.before;
+  const deployAfter = realDeploy ? gasAfter! : MODEL.deploy.after;
+  const depPct = (1 - deployAfter / deployBefore) * 100;
+
+  // Hero % — real deploy savings ratio when we have forge numbers.
+  const savedPct = realDeploy ? depPct : MODEL.savedPct(runCount) * 100;
+
+  // Cost estimation: prefer real deploy gas saved; fall back to blended model.
+  const realGasSaved = gasSaved != null && gasSaved > 0 ? gasSaved : null;
+  const costGasSaved = realGasSaved ?? MODEL.savedGas(runCount);
+  const mnt = MODEL.gasToMnt(costGasSaved);
+  const usd = mnt * mntUsd;
+
   const sliderVal = runCount <= 1 ? 0 : Math.round((Math.log10(runCount) / 6) * 600);
   const onSlide = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = +e.target.value;
     setRunCount(v === 0 ? 1 : Math.round(Math.pow(10, (v / 600) * 6)));
   };
   const runLabel = runCount === 0 ? "deploy only" : fmt(runCount) + " calls";
+
+  const hasPatterns = patterns.length > 0;
 
   return (
     <div className="rail">
@@ -41,12 +70,14 @@ export function Rail({ done, runCount, setRunCount, fnIdx, setFnIdx, mntUsd }: R
         <div className="meta">
           <div className="big">Up to {Math.round(savedPct)}% cheaper</div>
           <div className="sub">
-            Blended across deployment and {runLabel}. 7 optimizations applied automatically.
+            {realDeploy
+              ? `Forge-verified on Mantle fork. ${patterns.length > 0 ? `${patterns.length} pattern(s) applied.` : ""}`
+              : `Blended across deployment and ${runLabel}. 7 optimizations applied automatically.`}
           </div>
         </div>
       </div>
 
-      {/* deploy + per-call */}
+      {/* deploy + patterns */}
       <div className="row2">
         <div className="card card-anim" style={{ animationDelay: "70ms" }}>
           <div className="lab">Deployment</div>
@@ -54,34 +85,44 @@ export function Rail({ done, runCount, setRunCount, fnIdx, setFnIdx, mntUsd }: R
             −<AnimatedNum value={depPct} run={done} format={(x) => x.toFixed(0)} />%
           </div>
           <div className="delta">
-            {fmtGas(dep.before)} → {fmtGas(dep.after)}
+            {fmtGas(deployBefore)} → {fmtGas(deployAfter)}
           </div>
           <div style={{ marginTop: 10 }}>
-            <BarMeter before={dep.before} after={dep.after} run={done} />
+            <BarMeter before={deployBefore} after={deployAfter} run={done} />
           </div>
         </div>
+
+        {/* Patterns applied — replaces the static per-function selector */}
         <div className="card card-anim" style={{ animationDelay: "130ms" }}>
-          <div className="lab">Per call</div>
-          <div className="val pos">
-            −<AnimatedNum value={fnPct} run={done} format={(x) => x.toFixed(0)} duration={500} />%
-          </div>
-          <div className="delta">{fmt(fn.before - fn.after)} gas saved</div>
-          <div style={{ marginTop: 10 }}>
-            <BarMeter before={fn.before} after={fn.after} run={done} />
-          </div>
-          <div className="fnsel">
-            {FUNCS.map((f, i) => (
-              <button key={f.name} className={"fnbtn" + (i === fnIdx ? " on" : "")} onClick={() => setFnIdx(i)}>
-                {f.name}()
-              </button>
-            ))}
-          </div>
+          <div className="lab">Patterns applied</div>
+          {hasPatterns ? (
+            <>
+              <div className="val pos" style={{ fontSize: 28 }}>
+                <AnimatedNum value={patterns.length} run={done} format={(x) => Math.round(x).toString()} duration={500} />
+              </div>
+              <div className="delta">gas optimization techniques</div>
+              <div className="fnsel" style={{ marginTop: 10, flexWrap: "wrap", gap: 4 }}>
+                {patterns.map((p) => (
+                  <span key={p} className="fnbtn on" title={p} style={{ cursor: "default", textTransform: "capitalize" }}>
+                    {patternLabel(p)}
+                  </span>
+                ))}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="val pos" style={{ fontSize: 28 }}>7</div>
+              <div className="delta">gas optimization techniques</div>
+            </>
+          )}
         </div>
       </div>
 
       {/* cost saved */}
       <div className="card card-anim" style={{ animationDelay: "190ms" }}>
-        <div className="lab">Estimated cost saved · {runLabel}</div>
+        <div className="lab">
+          {realGasSaved ? "Estimated cost saved · deploy" : `Estimated cost saved · ${runLabel}`}
+        </div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginTop: 6 }}>
           <div className="val mono" style={{ color: "var(--ink)" }}>
             <AnimatedNum value={mnt} run={done} format={fmtMnt} />{" "}
@@ -92,8 +133,14 @@ export function Rail({ done, runCount, setRunCount, fnIdx, setFnIdx, mntUsd }: R
           </div>
         </div>
         <div className="delta">
-          <AnimatedNum value={savedGas} run={done} format={fmtGas} /> gas saved total
+          <AnimatedNum value={costGasSaved} run={done} format={fmtGas} /> gas saved
+          {realGasSaved ? " (forge-measured)" : " (estimated)"}
         </div>
+        {analysis && (
+          <div className="assume" style={{ marginTop: 8, lineHeight: 1.5 }}>
+            {analysis}
+          </div>
+        )}
       </div>
 
       {/* simulation */}

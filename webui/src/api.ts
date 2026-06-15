@@ -8,6 +8,12 @@ export interface OptimizeResponse {
   analysis: string;
   suggested_patterns: string[];
   optimized_code: string;
+  /** Construction gas of the original — present only when forge verified. */
+  gas_before?: number;
+  /** Construction gas of the optimized contract — present only when forge verified. */
+  gas_after?: number;
+  /** Gas saved (positive = improvement) — present only when forge verified. */
+  gas_saved?: number;
 }
 
 /** Construction-gas figures parsed out of the `analysis` string when present. */

@@ -32,11 +32,14 @@ function OptimizeBtn({ phase, onOptimize, onReset }: { phase: Phase; onOptimize:
 export function App() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [runCount, setRunCount] = useState(100000);
-  const [fnIdx, setFnIdx] = useState(0);
   const [optimized, setOptimized] = useState<string | undefined>();
   const [analysis, setAnalysis] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [mntUsd, setMntUsd] = useState(MODEL.mntUsd);
+  const [gasBefore, setGasBefore] = useState<number | undefined>();
+  const [gasAfter, setGasAfter] = useState<number | undefined>();
+  const [gasSaved, setGasSaved] = useState<number | undefined>();
+  const [patterns, setPatterns] = useState<string[]>([]);
   const diffRef = useRef<DiffHandle>(null);
   const done = phase === "done";
 
@@ -58,6 +61,10 @@ export function App() {
       const res = await optimizeContract(source);
       setOptimized(res.optimized_code);
       setAnalysis(res.analysis);
+      setGasBefore(res.gas_before);
+      setGasAfter(res.gas_after);
+      setGasSaved(res.gas_saved);
+      setPatterns(res.suggested_patterns);
       setPhase("done");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -68,6 +75,10 @@ export function App() {
     setPhase("idle");
     setOptimized(undefined);
     setAnalysis("");
+    setGasBefore(undefined);
+    setGasAfter(undefined);
+    setGasSaved(undefined);
+    setPatterns([]);
     setError(null);
   };
 
@@ -166,7 +177,17 @@ export function App() {
 
         {/* stats rail */}
         {done ? (
-          <Rail done={done} runCount={runCount} setRunCount={setRunCount} fnIdx={fnIdx} setFnIdx={setFnIdx} mntUsd={mntUsd} />
+          <Rail
+            done={done}
+            runCount={runCount}
+            setRunCount={setRunCount}
+            mntUsd={mntUsd}
+            gasBefore={gasBefore}
+            gasAfter={gasAfter}
+            gasSaved={gasSaved}
+            patterns={patterns}
+            analysis={analysis}
+          />
         ) : (
           <div className="rail">
             <div className="rail-empty">
