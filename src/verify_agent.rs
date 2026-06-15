@@ -68,28 +68,42 @@ pub async fn gen_equivalence_test(
     };
 
     let user = format!(
-        "Write exactly ONE Solidity function `test_eq_{fn_name}()` (public, no args) that proves \
-         `{fn_name}` behaves identically on `o` and `p`.\n\
+        "Write exactly ONE Solidity function named `test_eq_{fn_name}` (public) that proves \
+         `{fn_name}` behaves identically on `o` and `p`. It MAY take fuzz parameters (preferred — \
+         see DIFFERENTIAL FUZZING) or take no args; either way keep the exact name `test_eq_{fn_name}`.\n\
          \n\
          HARD CONSTRAINTS (violating any of these makes the test unusable):\n\
          - Your output is pasted VERBATIM inside an existing test contract. Do NOT declare a \
            contract, imports, `o`, `p`, `setUp`, or any state variable — only the one function. \
            NO forge-std, NO vm/cheatcodes, NO console, NO comments.\n\
-         - OWNERSHIP: every call runs with msg.sender = THIS TEST CONTRACT (address(this)). \
-           For any function gated on ownership/balance of msg.sender (e.g. `require(ownerOf[id] == \
-           msg.sender)`, or that decrements the caller's balance), the caller must own/hold the \
-           thing FIRST — so mint to `address(this)`, NOT to an external address. Minting the target \
-           token to 0xBEEF and then calling transfer/approve from the test will revert with the \
-           owner check. Use external addresses only as the destination/recipient, never as the \
-           owner the gated call needs.\n\
-         - PRECONDITIONS FIRST: read the ORIGINAL function body and trace its requires and \
-           arithmetic with your exact literals before you write a single call. If a call needs \
-           owned tokens, balance, allowance, or supply, create that state first by calling setup \
-           functions IDENTICALLY on both `o` and `p` — and create ENOUGH of it. If the body \
-           subtracts N from a balance, mint to that holder N times first (mint adds 1 each call). \
-           A happy-path call that reverts on the original is a broken test and will be thrown away.\n\
+         - CALLER IS address(this): every call runs with msg.sender = THIS TEST CONTRACT. For any \
+           function gated on the caller's ownership/balance/allowance (e.g. `require(ownerOf[id] == \
+           msg.sender)`, or one that decrements the caller's balance), first put address(this) into \
+           that state using the ORIGINAL contract's OWN functions — never an external address as the \
+           gated owner. Use external addresses only as destinations/recipients.\n\
+         - PRECONDITIONS FIRST, USING THE CONTRACT'S REAL FUNCTIONS: read the ORIGINAL function body \
+           and trace its requires and arithmetic with your exact literals before writing a single \
+           call. If a call needs prior state (a balance, allowance, supply, a registered entry), \
+           create it first by calling the contract's ACTUAL state-changing functions IDENTICALLY on \
+           `o` and `p`, and create ENOUGH of it for the arithmetic the body performs. Do NOT \
+           hallucinate generic helpers like `mint()`, `balanceOf()`, `totalSupply()`, `ownerOf()` or \
+           `approve()` unless they actually exist in the ORIGINAL contract — call only functions and \
+           getters that appear in the provided source. If the contract offers no path to reach a \
+           required state, do not test that path. A happy-path call that reverts on the original is a \
+           broken test and will be thrown away.\n\
+         - NO CHEATCODES, ONE CALLER, NO ETH: there is no `vm`, so you cannot advance time, change \
+           msg.sender, or fund the test with ETH. If a function needs elapsed time, a different \
+           caller, or msg.value the test contract does not have, do not try to force it — pick a \
+           happy path address(this) can reach right now; if none exists, emit ONLY the revert-parity \
+           probe. Never call a payable function with a value the test contract cannot pay.\n\
          - Happy-path calls are NEVER wrapped in try/catch — if they revert, the test should fail \
            loudly. try/catch is only for the deliberate revert-parity probe at the end.\n\
+         - PUBLIC GETTERS OF STRUCTS RETURN TUPLES, NOT STRUCTS. A `mapping(...) public stakes` \
+           whose value is `struct Stake {{ uint256 amount; uint256 since; bool active; }}` generates \
+           a getter returning `(uint256, uint256, bool)` — you CANNOT write `o.stakes(a).amount`. \
+           Destructure positionally, naming only the fields you compare: \
+           `(uint256 amtO,,) = o.stakes(a); (uint256 amtP,,) = p.stakes(a); require(amtO == amtP, \"amt\");`. \
+           The same applies to any `public` struct or array-of-struct state variable.\n\
          - Every variable you declare must be used. No dead code.\n\
          \n\
          WHAT TO ASSERT (coverage is the goal):\n\
@@ -99,19 +113,47 @@ pub async fn gen_equivalence_test(
            value, AND every public getter the function could have touched — including ones it \
            should NOT have changed (e.g. after approve, also check ownerOf and balanceOf are \
            still equal). Wrong-storage-slot bugs hide exactly there.\n\
-         - MANDATORY balance coverage: after any call that moves or changes balances, assert \
+         - CONSERVATION COVERAGE: if the contract exposes balance/supply getters (e.g. `balanceOf`, \
+           `totalSupply`), then after any call that moves or changes balances assert \
            `o.balanceOf(X) == p.balanceOf(X)` for EVERY address involved — the CALLER \
-           (address(this)) FIRST, then every recipient/other party — and assert `o.totalSupply() \
-           == p.totalSupply()`. The single most-missed bug is an off-by-one or non-conserving \
-           change to the CALLER's own balance (e.g. debiting 6 while crediting 5); checking only \
-           the recipient lets it slip through. Never skip the caller's balance.\n\
+           (address(this)) FIRST, then every recipient/other party — and `o.totalSupply() == \
+           p.totalSupply()`. The single most-missed bug is a non-conserving change to the CALLER's \
+           own balance (e.g. debiting 6 while crediting 5); checking only the recipient lets it slip \
+           through, so never skip the caller's balance. If the contract has no such getters, assert \
+           equality of whatever public state the call actually touches instead.\n\
          - Use distinct literals so swapped values can't cancel out (e.g. two different \
            addresses, token ids 0 and 1) and exercise the function at least twice when cheap.\n\
          - One `require(a == b, \"label\")` per checked value, with a short unique label.\n\
          - End with ONE revert-parity probe: a call that should revert per the original's \
            requires, wrapped in try/catch on both, then `require(ro == rp, \"revert parity\")`.\n\
          \n\
-         Example shape (adapt to the real function, getters, and preconditions):\n\
+         DIFFERENTIAL FUZZING (PREFERRED — far stronger than fixed literals):\n\
+         - You MAY declare the test with typed parameters, e.g. \
+           `function test_eq_{fn_name}(uint256 amt, address a) public`. Foundry fuzzes them, running \
+           the SAME random inputs on `o` and `p` many times. Keep the name `test_eq_{fn_name}` (do \
+           NOT rename to `testFuzz_`).\n\
+         - There is NO `vm.assume` and NO forge-std `bound`, so you CANNOT reject an input. You must \
+           MAP every possible fuzz value into a valid domain with plain arithmetic at the very top of \
+           the function, so the ORIGINAL never reverts for ANY input — otherwise the fuzzer finds a \
+           reverting case, the sanity suite fails, and your test is discarded. Bound conservatively:\n\
+           · amounts / ids / counts: `amt = amt % 1000000 + 1;` (non-zero, comfortably within any \
+             supply or balance the body needs — keep upper bounds small so repeated calls can't \
+             overflow the original's arithmetic).\n\
+           · recipient addresses: `a = address(uint160(a) | 1);` to avoid address(0); if the body \
+             rejects the caller as recipient, also push it off address(this).\n\
+         - Fuzz ONLY free value/amount/recipient inputs. A parameter that must hold a fixed role — \
+           above all the caller/owner, which is ALWAYS address(this) — must stay a fixed literal, \
+           never a fuzz arg.\n\
+         - Every fuzzed call is a happy-path call on BOTH instances with the SAME bounded value; \
+           assert equality of returns and touched getters exactly as above. The revert-parity probe \
+           at the end still uses FIXED out-of-domain literals (not the fuzz inputs).\n\
+         - If a function takes no fuzzable input (e.g. a no-arg owner setter), just write it with no \
+           parameters and fixed literals — fuzzing is optional, correctness is not.\n\
+         \n\
+         The two examples below are for ERC721-style TOKEN contracts and are illustrations of SHAPE \
+         only — the `mint`/`ownerOf`/`balanceOf`/`transfer` calls and the 999 bad-id probe are \
+         token-specific. Adapt the structure to the ACTUAL functions and getters of the provided \
+         ORIGINAL contract; if it is not a token, do not use any of these names.\n\
          ```solidity\n\
          function test_eq_mint() public {{\n\
              address a1 = address(0xBEEF);\n\
@@ -149,6 +191,22 @@ pub async fn gen_equivalence_test(
              require(o.getApproved(idO) == p.getApproved(idP), \"approvalCleared\");\n\
              bool ro; try o.transfer(dest, 999) {{ ro = false; }} catch {{ ro = true; }}\n\
              bool rp; try p.transfer(dest, 999) {{ rp = false; }} catch {{ rp = true; }}\n\
+             require(ro == rp, \"revert parity\");\n\
+         }}\n\
+         ```\n\
+         Fuzzed, NON-token example (note: bounds the input first so the original never reverts, \
+         destructures the struct-tuple getter, and keeps the caller as address(this)):\n\
+         ```solidity\n\
+         function test_eq_stake(uint256 amount) public {{\n\
+             amount = amount % 1000000 + 1;\n\
+             o.stake(amount);\n\
+             p.stake(amount);\n\
+             require(o.totalStaked() == p.totalStaked(), \"staked\");\n\
+             (uint256 amtO,,) = o.stakes(address(this));\n\
+             (uint256 amtP,,) = p.stakes(address(this));\n\
+             require(amtO == amtP, \"amt\");\n\
+             bool ro; try o.stake(0) {{ ro = false; }} catch {{ ro = true; }}\n\
+             bool rp; try p.stake(0) {{ rp = false; }} catch {{ rp = true; }}\n\
              require(ro == rp, \"revert parity\");\n\
          }}\n\
          ```\n\

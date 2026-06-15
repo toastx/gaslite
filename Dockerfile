@@ -56,8 +56,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssl \
         libgomp1 \
         libstdc++6 \
+        libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
+
+# ── Foundry (forge) ─────────────────────────────────────────────────────────
+# Without forge on PATH the optimize endpoint runs in one-shot mode and reports
+# NO gas figures (forge_available() == false → the verify + --gas-report path is
+# skipped, so the web UI only ever sees estimated numbers). Copy the prebuilt
+# binary from the official image to enable closed-loop verification and real
+# construction + per-function gas measurement. solc is fetched on demand by svm
+# into $HOME/.svm (/app, writable) on the first compile.
+COPY --from=ghcr.io/foundry-rs/foundry:stable /usr/local/bin/forge /usr/local/bin/forge
 
 # Run as an unprivileged user; /app must be writable for the fastembed model
 # cache (.fastembed_cache) that is downloaded on first start.

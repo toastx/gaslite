@@ -12,6 +12,7 @@ declare module "*.svg" {
    it, so the rest of `import.meta` keeps its real types. */
 interface ImportMetaEnv {
   readonly VITE_GASLITE_API?: string;
+  readonly VITE_MANTLE_RPC?: string;
 }
 interface ImportMeta {
   readonly env?: ImportMetaEnv;

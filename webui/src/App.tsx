@@ -36,6 +36,7 @@ export function App() {
   const [analysis, setAnalysis] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [mntUsd, setMntUsd] = useState(MODEL.mntUsd);
+  const [gasPriceGwei, setGasPriceGwei] = useState(MODEL.gasPriceGwei);
   const [gasBefore, setGasBefore] = useState<number | undefined>();
   const [gasAfter, setGasAfter] = useState<number | undefined>();
   const [gasSaved, setGasSaved] = useState<number | undefined>();
@@ -50,6 +51,22 @@ export function App() {
       .then((d) => {
         const price = d?.mantle?.usd;
         if (typeof price === "number" && price > 0) setMntUsd(price);
+      })
+      .catch(() => {/* keep default */});
+  }, []);
+
+  // Live Mantle gas price via the public RPC (eth_gasPrice returns wei → Gwei).
+  useEffect(() => {
+    const rpc = import.meta.env?.VITE_MANTLE_RPC ?? "https://rpc.mantle.xyz";
+    fetch(rpc, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_gasPrice", params: [] }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        const gwei = parseInt(d?.result, 16) / 1e9;
+        if (Number.isFinite(gwei) && gwei > 0) setGasPriceGwei(gwei);
       })
       .catch(() => {/* keep default */});
   }, []);
@@ -185,6 +202,7 @@ export function App() {
             runCount={runCount}
             setRunCount={setRunCount}
             mntUsd={mntUsd}
+            gasPriceGwei={gasPriceGwei}
             gasBefore={gasBefore}
             gasAfter={gasAfter}
             gasSaved={gasSaved}

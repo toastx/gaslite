@@ -19,6 +19,14 @@ export function fmtMnt(n: number): string {
   if (n > 0) return "<0.0001";
   return "0";
 }
+/** Compact label for a power-of-ten gas magnitude (exponent e → "1M", "10B", …). */
+function decadeLabel(e: number): string {
+  const v = Math.pow(10, e);
+  if (v >= 1e9) return v / 1e9 + "B";
+  if (v >= 1e6) return v / 1e6 + "M";
+  if (v >= 1e3) return v / 1e3 + "K";
+  return String(Math.round(v));
+}
 
 /* ---------- count-up hook (easeOutExpo) ---------- */
 interface CountUpOpts {
@@ -171,9 +179,14 @@ export function SavingsGraph({
     padB = 24;
   const plotW = width - padL - padR,
     plotH = height - padT - padB;
-  const logMax = 6; // log10(1e6)
-  const yMin = 6,
-    yMax = 11; // gas magnitude 1e6 .. 1e11
+  const logMax = 6; // log10(1e6) — x-axis spans 1 .. 1M calls (matches the slider)
+  // Y-axis range derived from the actual model so real and demo gas magnitudes
+  // both fit: from the smallest plotted value (optimized deploy) up to the largest
+  // (original at max calls), snapped to whole decades with ≥1 decade of span.
+  const yLo = Math.max(1, model.cumAfter(0));
+  const yHi = Math.max(yLo * 10, model.cumBefore(Math.pow(10, logMax)));
+  const yMin = Math.floor(Math.log10(yLo));
+  const yMax = Math.max(yMin + 1, Math.ceil(Math.log10(yHi)));
   const xOf = (n: number) => padL + (Math.log10(n + 1) / logMax) * plotW;
   const yOf = (g: number) => padT + (1 - (Math.log10(Math.max(g, 1)) - yMin) / (yMax - yMin)) * plotH;
 
@@ -194,8 +207,8 @@ export function SavingsGraph({
   const myA = yOf(model.cumAfter(runCount));
   const xticks = [1, 10, 100, 1000, 10000, 100000, 1000000];
   const xlab = ["1", "10", "100", "1K", "10K", "100K", "1M"];
-  const yticks = [6, 7, 8, 9, 10, 11];
-  const ylab = ["1M", "10M", "100M", "1B", "10B", "100B"];
+  const yticks = Array.from({ length: yMax - yMin + 1 }, (_, i) => yMin + i);
+  const ylab = yticks.map(decadeLabel);
 
   const tr = { transition: "all .35s cubic-bezier(.2,.7,.3,1)" } as const;
   return (

@@ -2,7 +2,7 @@
    patterns applied, estimated cost saved and a live gas/cost simulation. All
    numbers are forge-measured when available, falling back to the demo model. */
 import { useMemo, useState } from "react";
-import { MODEL, PRESETS, makeModel, type SimModel } from "./data";
+import { MODEL, PRESETS, makeModel } from "./data";
 import { AnimatedNum, BarMeter, SavingsGraph, fmt, fmtGas, fmtMnt } from "./lib";
 import type { FunctionGas } from "./api";
 import logo from "./gaslite-mark-white.png";
@@ -12,6 +12,7 @@ interface RailProps {
   runCount: number;
   setRunCount: (n: number) => void;
   mntUsd: number;
+  gasPriceGwei: number;
   gasBefore?: number;
   gasAfter?: number;
   gasSaved?: number;
@@ -34,6 +35,7 @@ export function Rail({
   runCount,
   setRunCount,
   mntUsd,
+  gasPriceGwei,
   gasBefore,
   gasAfter,
   gasSaved,
@@ -58,21 +60,20 @@ export function Rail({
   const fnAfter = fn ? fn.gas_optimized! : MODEL.perRun.after;
   const fnPct = (1 - fnAfter / fnBefore) * 100;
 
-  // Build the cost-projection model from real numbers when we have them. The
-  // "representative call" is the most expensive measured function (the one whose
-  // savings matter most), so the simulation reflects the real workload.
-  const model: Pick<SimModel, "cumBefore" | "cumAfter" | "savedGas" | "savedPct"> = useMemo(() => {
-    if (!realDeploy || !hasRealCalls) return MODEL;
-    const rep = callFns.reduce((a, b) => (b.gas_original! > a.gas_original! ? b : a));
-    return makeModel(deployBefore, deployAfter, rep.gas_original!, rep.gas_optimized!);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [realDeploy, hasRealCalls, deployBefore, deployAfter, callFns]);
+  // The simulation projects N calls of the SELECTED per-call function on top of
+  // the (real or demo) deploy cost — built from the same deployBefore/After and
+  // fnBefore/After used by the cards, so the graph never disagrees with them.
+  const model = useMemo(
+    () => makeModel(deployBefore, deployAfter, fnBefore, fnAfter),
+    [deployBefore, deployAfter, fnBefore, fnAfter],
+  );
 
   const savedGas = model.savedGas(runCount);
   const savedPct = model.savedPct(runCount) * 100;
 
-  // Cost: blended deploy + runtime over runCount, from the (real or demo) model.
-  const mnt = MODEL.gasToMnt(savedGas);
+  // Cost: blended deploy + runtime over runCount, priced at the live Mantle gas
+  // price (Gwei) and MNT/USD. gas units · Gwei · 1e-9 = MNT.
+  const mnt = savedGas * gasPriceGwei * 1e-9;
   const usd = mnt * mntUsd;
 
   const sliderVal = runCount <= 1 ? 0 : Math.round((Math.log10(runCount) / 6) * 600);
@@ -80,7 +81,8 @@ export function Rail({
     const v = +e.target.value;
     setRunCount(v === 0 ? 1 : Math.round(Math.pow(10, (v / 600) * 6)));
   };
-  const runLabel = runCount === 0 ? "deploy only" : fmt(runCount) + " calls";
+  const runLabel =
+    runCount === 0 ? "deploy only" : `${fmt(runCount)} ${fn ? fn.name + "() " : ""}calls`;
   const hasPatterns = patterns.length > 0;
 
   return (
@@ -241,7 +243,7 @@ export function Rail({
           <span className="v pos">{fmt(model.cumAfter(runCount))} gas</span>
         </div>
         <div className="assume">
-          assumes {MODEL.gasPriceGwei} Gwei · MNT ${mntUsd.toFixed(4)} on Mantle
+          assumes {gasPriceGwei.toFixed(4)} Gwei · MNT ${mntUsd.toFixed(4)} on Mantle (live)
           {hasRealCalls ? " · per-call gas forge-measured" : ""}
         </div>
       </div>

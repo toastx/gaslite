@@ -228,6 +228,7 @@ pub(crate) fn extract_sol_contract_name(source: &str) -> Option<String> {
 fn build_gas_test(
     orig_name: &str,
     opt_name: &str,
+    ctor_args: &str,
 ) -> String {
     format!(
         "// SPDX-License-Identifier: MIT\n\
@@ -235,10 +236,165 @@ fn build_gas_test(
          import \"../src/Original.sol\";\n\
          import \"../src/Optimized.sol\";\n\n\
          contract GasCompareTest {{\n\
-             function test_original() external {{ new {orig_name}(); }}\n\
-             function test_optimized() external {{ new {opt_name}(); }}\n\
+             function test_original() external {{ new {orig_name}({ctor_args}); }}\n\
+             function test_optimized() external {{ new {opt_name}({ctor_args}); }}\n\
          }}\n"
     )
+}
+
+/// Synthesize a Solidity constructor-argument list (no surrounding parens) of
+/// default literals, so the sandbox can instantiate contracts whose constructor
+/// takes parameters (e.g. `constructor(address _token)` → `address(0)`). Returns
+/// "" for a parameterless or absent constructor. The optimizer never changes the
+/// constructor signature, so the original's args work for both contracts.
+fn synthesize_constructor_args(source: &str) -> String {
+    match extract_constructor_params(source) {
+        Some(params) => params
+            .iter()
+            .map(|t| default_literal_for_type(t))
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => String::new(),
+    }
+}
+
+/// Extract the constructor's parameter TYPES (data location + name stripped) from
+/// the source. `None` = no constructor; `Some(vec![])` = constructor with no params.
+fn extract_constructor_params(source: &str) -> Option<Vec<String>> {
+    // Find a `constructor` keyword that is immediately followed (modulo whitespace)
+    // by `(` — i.e. the definition, not a mention in a comment/string.
+    let mut search = 0;
+    let open = loop {
+        let rel = source[search..].find("constructor")?;
+        let kw = search + rel;
+        let after = kw + "constructor".len();
+        let before_boundary = kw == 0
+            || !matches!(source.as_bytes()[kw - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_');
+        let rest = source[after..].trim_start();
+        if before_boundary && rest.starts_with('(') {
+            break after + source[after..].find('(')?;
+        }
+        search = after;
+    };
+
+    // Walk to the matching close paren.
+    let mut depth = 0i32;
+    let mut close = None;
+    for (i, ch) in source[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let inner = &source[open + 1..close?];
+    if inner
+        .trim()
+        .is_empty()
+    {
+        return Some(vec![]);
+    }
+
+    // Split on top-level commas (ignoring nested generics/arrays/tuples).
+    let mut params: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in inner.chars() {
+        match ch {
+            '(' | '[' | '<' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' | ']' | '>' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                params.push(
+                    cur.trim()
+                        .to_string(),
+                );
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur
+        .trim()
+        .is_empty()
+    {
+        params.push(
+            cur.trim()
+                .to_string(),
+        );
+    }
+
+    Some(
+        params
+            .iter()
+            .map(|p| param_type(p))
+            .collect(),
+    )
+}
+
+/// Reduce a constructor parameter (`address payable _to`) to just its type
+/// (`address payable`) by dropping the data location and the parameter name.
+fn param_type(param: &str) -> String {
+    let toks: Vec<&str> = param
+        .split_whitespace()
+        .filter(|t| !matches!(*t, "memory" | "calldata" | "storage"))
+        .collect();
+    // The trailing identifier is the parameter name when more than the type remains.
+    if toks.len() > 1 {
+        toks[..toks.len() - 1].join(" ")
+    } else {
+        toks.join(" ")
+    }
+}
+
+/// A default literal for a Solidity type, used to fill a constructor call. Covers
+/// the common primitives, arrays and contract/interface types; falls back to `0`.
+fn default_literal_for_type(ty: &str) -> String {
+    let t = ty.trim();
+    if let Some(inner) = t.strip_suffix("[]") {
+        return format!(
+            "new {}[](0)",
+            inner.trim()
+        );
+    }
+    if t.contains("payable") {
+        return "payable(address(0))".to_string();
+    }
+    match t {
+        "address" => return "address(0)".to_string(),
+        "bool" => return "false".to_string(),
+        "string" | "bytes" => return "\"\"".to_string(),
+        _ => {}
+    }
+    if t.starts_with("uint") || t.starts_with("int") {
+        return "0".to_string();
+    }
+    // Fixed-size bytesN.
+    if let Some(n) = t.strip_prefix("bytes")
+        && n.parse::<u32>()
+            .is_ok()
+    {
+        return format!("{t}(0)");
+    }
+    // Contract/interface types (PascalCase) — cast the zero address.
+    if t.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase())
+    {
+        return format!("{t}(address(0))");
+    }
+    "0".to_string()
 }
 
 // Strip markdown artifacts that DeepSeek sometimes embeds in optimized output:
@@ -365,10 +521,21 @@ fn write_sandbox_project(
     let mantle_rpc =
         std::env::var("MANTLE_RPC_URL").unwrap_or_else(|_| "https://rpc.mantle.xyz".to_string());
 
+    // Differential tests may be fuzzed (parameterized `test_eq_*`); cap runs so a
+    // Mantle-fork suite stays bounded. Override with FORGE_FUZZ_RUNS.
+    let fuzz_runs = std::env::var("FORGE_FUZZ_RUNS")
+        .ok()
+        .and_then(|v| {
+            v.parse::<u32>()
+                .ok()
+        })
+        .unwrap_or(64)
+        .max(1);
     fs::write(
         root.join("foundry.toml"),
         format!(
             "[profile.default]\nsrc=\"src\"\ntest=\"test\"\nevm_version=\"paris\"\n\
+                 [fuzz]\nruns={fuzz_runs}\n\
                  [rpc_endpoints]\nmantle=\"{mantle_rpc}\"\n"
         ),
     )
@@ -422,9 +589,10 @@ fn forge_sandbox_inner(
     info!("  forge build: OK");
 
     // ── test (gas measurement via Mantle fork) ─────────────────────────────────
+    let ctor_args = synthesize_constructor_args(original);
     fs::write(
         root.join("test/GasCompare.t.sol"),
-        build_gas_test(&orig_name, &opt_name),
+        build_gas_test(&orig_name, &opt_name, &ctor_args),
     )
     .map_err(|e| e.to_string())?;
 
@@ -518,6 +686,7 @@ fn build_equivalence_test(
     orig_name: &str,
     opt_name: &str,
     test_bodies: &[String],
+    ctor_args: &str,
 ) -> String {
     let joined = test_bodies.join("\n\n");
     format!(
@@ -528,15 +697,15 @@ fn build_equivalence_test(
          contract EquivalenceTest {{\n\
          \x20   {orig_name} o;\n\
          \x20   {opt_name} p;\n\
-         \x20   function setUp() public {{ o = new {orig_name}(); p = new {opt_name}(); }}\n\
-         \x20   function test_gas_original() external {{ new {orig_name}(); }}\n\
-         \x20   function test_gas_optimized() external {{ new {opt_name}(); }}\n\n\
+         \x20   function setUp() public {{ o = new {orig_name}({ctor_args}); p = new {opt_name}({ctor_args}); }}\n\
+         \x20   function test_gas_original() external {{ new {orig_name}({ctor_args}); }}\n\
+         \x20   function test_gas_optimized() external {{ new {opt_name}({ctor_args}); }}\n\n\
          {joined}\n\
          }}\n\n\
          contract SanityTest {{\n\
          \x20   {orig_name} o;\n\
          \x20   {orig_name} p;\n\
-         \x20   function setUp() public {{ o = new {orig_name}(); p = new {orig_name}(); }}\n\n\
+         \x20   function setUp() public {{ o = new {orig_name}({ctor_args}); p = new {orig_name}({ctor_args}); }}\n\n\
          {joined}\n\
          }}\n"
     )
@@ -623,9 +792,10 @@ fn equivalence_inner(
         .iter()
         .map(|(_, body)| body.clone())
         .collect();
+    let ctor_args = synthesize_constructor_args(original);
     fs::write(
         root.join("test/Equivalence.t.sol"),
-        build_equivalence_test(&orig_name, &opt_name, &bodies),
+        build_equivalence_test(&orig_name, &opt_name, &bodies, &ctor_args),
     )
     .map_err(|e| e.to_string())?;
 
@@ -902,4 +1072,91 @@ fn suite_test_passed(
     lines
         .iter()
         .any(|l| l.starts_with("[PASS]") && l.contains(&needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctor_args_none_when_no_constructor() {
+        let src = "contract C { function f() public {} }";
+        assert_eq!(synthesize_constructor_args(src), "");
+    }
+
+    #[test]
+    fn ctor_args_empty_constructor() {
+        let src = "contract C { constructor() { } }";
+        assert_eq!(synthesize_constructor_args(src), "");
+    }
+
+    #[test]
+    fn ctor_args_single_address() {
+        let src = "contract C { constructor(address _token) { } }";
+        assert_eq!(
+            synthesize_constructor_args(src),
+            "address(0)"
+        );
+    }
+
+    #[test]
+    fn ctor_args_mixed_primitives() {
+        let src =
+            "contract C { constructor(address _o, uint256 _r, bool _b, string memory _n) { } }";
+        assert_eq!(
+            synthesize_constructor_args(src),
+            "address(0), 0, false, \"\""
+        );
+    }
+
+    #[test]
+    fn ctor_args_array_and_payable_and_contract() {
+        let src = "contract C { constructor(address[] memory xs, address payable to, IERC20 t) { } }";
+        assert_eq!(
+            synthesize_constructor_args(src),
+            "new address[](0), payable(address(0)), IERC20(address(0))"
+        );
+    }
+
+    #[test]
+    fn ctor_args_fixed_bytes() {
+        let src = "contract C { constructor(bytes32 root) { } }";
+        assert_eq!(
+            synthesize_constructor_args(src),
+            "bytes32(0)"
+        );
+    }
+
+    #[test]
+    fn ctor_keyword_in_identifier_is_ignored() {
+        // No real constructor; a function whose name contains "constructor".
+        let src = "contract C { function reconstructor() public {} }";
+        assert_eq!(synthesize_constructor_args(src), "");
+    }
+
+    #[test]
+    fn gas_report_parses_per_function_avg() {
+        let report = "\
+| src/Original.sol:RewardPool contract |                 |       |        |       |         |
+| Function Name                        | min             | avg   | median | max   | # calls |
+| distribute                           | 12000           | 23456 | 23456  | 34000 | 2       |
+| stake                                | 40000           | 41000 | 41000  | 42000 | 1       |
+| src/Optimized.sol:RewardPoolOptimized contract |       |       |        |       |         |
+| Function Name                        | min             | avg   | median | max   | # calls |
+| distribute                           | 8000            | 15000 | 15000  | 22000 | 2       |
+| stake                                | 30000           | 31000 | 31000  | 32000 | 1       |";
+        let out = parse_gas_report(report, "RewardPool", "RewardPoolOptimized");
+        let dist = out
+            .iter()
+            .find(|f| f.name == "distribute")
+            .unwrap();
+        assert_eq!(dist.gas_original, Some(23456));
+        assert_eq!(dist.gas_optimized, Some(15000));
+        assert_eq!(dist.gas_saved, Some(8456));
+        let stake = out
+            .iter()
+            .find(|f| f.name == "stake")
+            .unwrap();
+        assert_eq!(stake.gas_saved, Some(10000));
+    }
 }
