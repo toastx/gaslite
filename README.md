@@ -5,6 +5,9 @@
 # Gaslite
 
 **An AI gas-optimization engine for Solidity, tuned for the Mantle L2.**
+<br/>
+
+![GitHub stars](https://img.shields.io/github/stars/toastx/gaslite?style=for-the-badge&logo=github) ![GitHub forks](https://img.shields.io/github/forks/toastx/gaslite?style=for-the-badge&logo=github) ![GitHub issues](https://img.shields.io/github/issues/toastx/gaslite?style=for-the-badge&logo=github) ![Last commit](https://img.shields.io/github/last-commit/toastx/gaslite?style=for-the-badge&logo=github) ![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white) ![React](https://img.shields.io/badge/React-61DAFB?style=for-the-badge&logo=react&logoColor=white) ![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
 
 Gaslite reads your contract, retrieves battle-tested Yul/assembly optimization
 patterns from a curated knowledge base, rewrites each function with a frontier

@@ -1,6 +1,6 @@
 /* Gaslite IDE — top bar, the Monaco diff with idle/analyzing overlays, and the
    savings rail. */
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import { MODEL, TECHNIQUES, REASONS } from "./data";
 import { MonacoDiff, type DiffHandle } from "./MonacoDiff";
 import { Rail } from "./Rail";
@@ -36,8 +36,19 @@ export function App() {
   const [optimized, setOptimized] = useState<string | undefined>();
   const [analysis, setAnalysis] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const [mntUsd, setMntUsd] = useState(MODEL.mntUsd);
   const diffRef = useRef<DiffHandle>(null);
   const done = phase === "done";
+
+  useEffect(() => {
+    fetch("https://api.coingecko.com/api/v3/simple/price?ids=mantle&vs_currencies=usd")
+      .then((r) => r.json())
+      .then((d) => {
+        const price = d?.mantle?.usd;
+        if (typeof price === "number" && price > 0) setMntUsd(price);
+      })
+      .catch(() => {/* keep default */});
+  }, []);
 
   const optimize = async () => {
     setError(null);
@@ -155,7 +166,7 @@ export function App() {
 
         {/* stats rail */}
         {done ? (
-          <Rail done={done} runCount={runCount} setRunCount={setRunCount} fnIdx={fnIdx} setFnIdx={setFnIdx} />
+          <Rail done={done} runCount={runCount} setRunCount={setRunCount} fnIdx={fnIdx} setFnIdx={setFnIdx} mntUsd={mntUsd} />
         ) : (
           <div className="rail">
             <div className="rail-empty">

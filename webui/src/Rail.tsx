@@ -10,13 +10,14 @@ interface RailProps {
   setRunCount: (n: number) => void;
   fnIdx: number;
   setFnIdx: (i: number) => void;
+  mntUsd: number;
 }
 
-export function Rail({ done, runCount, setRunCount, fnIdx, setFnIdx }: RailProps) {
+export function Rail({ done, runCount, setRunCount, fnIdx, setFnIdx, mntUsd }: RailProps) {
   const savedGas = MODEL.savedGas(runCount);
   const savedPct = MODEL.savedPct(runCount) * 100;
   const mnt = MODEL.gasToMnt(savedGas),
-    usd = MODEL.gasToUsd(savedGas);
+    usd = mnt * mntUsd;
   const fn = FUNCS[fnIdx]!,
     fnPct = (1 - fn.after / fn.before) * 100;
   const dep = MODEL.deploy,
@@ -148,7 +149,7 @@ export function Rail({ done, runCount, setRunCount, fnIdx, setFnIdx }: RailProps
           <span className="v pos">{fmt(MODEL.cumAfter(runCount))} gas</span>
         </div>
         <div className="assume">
-          assumes {MODEL.gasPriceGwei} Gwei · MNT ${MODEL.mntUsd} on Mantle
+          assumes {MODEL.gasPriceGwei} Gwei · MNT ${mntUsd.toFixed(4)} on Mantle
         </div>
       </div>
     </div>

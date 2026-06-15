@@ -359,10 +359,35 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
 }
 
 fn spawn_pinger() {
-    const DEFAULT_URL: &str = "https://gaslite-analytics.onrender.com/api/status";
+    // Keep the sibling Render services warm (free tier spins down when idle).
+    const DEFAULT_URLS: &[&str] = &[
+        "https://gaslite-analytics.onrender.com/api/status",
+        "https://gaslite-analyzer.onrender.com",
+    ];
     const DEFAULT_INTERVAL_SECS: u64 = 300;
 
-    let url = std::env::var("PING_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
+    // `PING_URLS` (comma-separated) overrides the whole list; `PING_URL` stays
+    // supported for a single target; otherwise ping both defaults.
+    let urls: Vec<String> = std::env::var("PING_URLS")
+        .ok()
+        .or_else(|| std::env::var("PING_URL").ok())
+        .map(|v| {
+            v.split(',')
+                .map(|s| {
+                    s.trim()
+                        .to_string()
+                })
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .filter(|v: &Vec<String>| !v.is_empty())
+        .unwrap_or_else(|| {
+            DEFAULT_URLS
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        });
+
     let interval_secs = std::env::var("PING_INTERVAL_SECS")
         .ok()
         .and_then(|v| {
@@ -383,33 +408,56 @@ fn spawn_pinger() {
             }
         };
 
-        info!("pinger: targeting {url} every {interval_secs}s");
+        info!(
+            "pinger: targeting {} url(s) every {interval_secs}s: {}",
+            urls.len(),
+            urls.join(", ")
+        );
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         loop {
             ticker
                 .tick()
                 .await;
-            let started = std::time::Instant::now();
-            match client
-                .get(&url)
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let ms = started
-                        .elapsed()
-                        .as_millis();
-                    if status.is_success() {
-                        info!("pinger: OK {status} in {ms}ms");
-                    } else {
-                        warn!("pinger: non-2xx {status} in {ms}ms");
-                    }
-                }
-                Err(e) => warn!("pinger: request failed: {e}"),
+            // Ping every target concurrently so one slow host doesn't delay the rest.
+            let mut set = tokio::task::JoinSet::new();
+            for url in &urls {
+                let client = client.clone();
+                let url = url.clone();
+                set.spawn(async move { ping_once(&client, &url).await });
             }
+            while set
+                .join_next()
+                .await
+                .is_some()
+            {}
         }
     });
+}
+
+/// One keep-alive GET, logging the outcome (labelled with the URL).
+async fn ping_once(
+    client: &reqwest::Client,
+    url: &str,
+) {
+    let started = std::time::Instant::now();
+    match client
+        .get(url)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            let ms = started
+                .elapsed()
+                .as_millis();
+            if status.is_success() {
+                info!("pinger: OK {status} in {ms}ms — {url}");
+            } else {
+                warn!("pinger: non-2xx {status} in {ms}ms — {url}");
+            }
+        }
+        Err(e) => warn!("pinger: request failed for {url}: {e}"),
+    }
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────

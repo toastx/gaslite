@@ -235,8 +235,8 @@ export const MonacoDiff = forwardRef<DiffHandle, { phase: Phase; optimizedSrc?: 
     const { monaco, modified, me, diff } = r;
     setWhy(null);
 
-    // before Optimize, freeze the editor — no scroll, no edits, pinned to top
-    const locked = phase !== "done";
+    // during analysis only, freeze the editor — no scroll, no edits, pinned to top
+    const locked = phase === "analyzing";
     const lockScroll = {
       vertical: locked ? "hidden" : "auto",
       horizontal: locked ? "hidden" : "auto",
