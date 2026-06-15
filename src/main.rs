@@ -362,7 +362,7 @@ fn spawn_pinger() {
     // Keep the sibling Render services warm (free tier spins down when idle).
     const DEFAULT_URLS: &[&str] = &[
         "https://gaslite-analytics.onrender.com/api/status",
-        "https://gaslite-analyzer.onrender.com",
+        "https://gaslite-analyzer.onrender.com/health",
     ];
     const DEFAULT_INTERVAL_SECS: u64 = 300;
 
