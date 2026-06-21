@@ -119,7 +119,7 @@ export function App() {
           </span>
           <a
             className="analytics-link"
-            href="https://gaslite-analytics.onrender.com/"
+            href="https://gaslite-analytics.fly.dev"
             target="_blank"
             rel="noopener noreferrer"
           >
