@@ -2,7 +2,7 @@
    the real server (POST /api/optimize), not the bundled demo dataset. Override
    the host with VITE_GASLITE_API at build time. */
 
-const API_BASE = import.meta.env?.VITE_GASLITE_API?.replace(/\/$/, "") ?? "https://gaslite.onrender.com";
+const API_BASE = import.meta.env?.VITE_GASLITE_API?.replace(/\/$/, "") ?? "https://gaslite.fly.dev";
 
 /** Real per-function runtime gas (original vs optimized), from forge's gas report. */
 export interface FunctionGas {
