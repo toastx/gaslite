@@ -29,10 +29,10 @@ use tokio::sync::OnceCell;
 use tracing::info;
 
 use crate::{
-    COLLECTION,
     db::{Turso, TursoArg},
     embedding::FastembedAdapter,
     normalize::PatternMatcher,
+    state::COLLECTION,
 };
 
 const TOKEN_CATS: [&str; 5] = ["erc20", "erc721", "erc1155", "erc2981", "accounts"];
