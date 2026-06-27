@@ -32,63 +32,44 @@ pub(crate) struct HealthResponse {
 }
 
 pub(crate) async fn health_check(
-    State(state): State<Arc<AppState>>
-) -> (
-    axum::http::StatusCode,
-    Json<HealthResponse>,
-) {
+    State(state): State<Arc<AppState>>,
+) -> (axum::http::StatusCode, Json<HealthResponse>) {
     info!("GET /health");
 
     // Turso (structured store) — cheapest possible round-trip.
     let t = std::time::Instant::now();
-    let turso = match state
-        .db
-        .query("SELECT 1", vec![])
-        .await
-    {
+    let turso = match state.db.query("SELECT 1", vec![]).await {
         Ok(_) => ComponentHealth {
             status: "ok",
-            latency_ms: t
-                .elapsed()
-                .as_millis(),
+            latency_ms: t.elapsed().as_millis(),
             error: None,
         },
         Err(e) => {
             warn!("health: turso check failed: {e}");
             ComponentHealth {
                 status: "down",
-                latency_ms: t
-                    .elapsed()
-                    .as_millis(),
+                latency_ms: t.elapsed().as_millis(),
                 error: Some(e),
             }
-        }
+        },
     };
 
     // Qdrant (vector store) — listing collections is a lightweight connectivity probe.
     let q = std::time::Instant::now();
-    let qdrant = match state
-        .qdrant
-        .list_collections()
-        .await
-    {
+    let qdrant = match state.qdrant.list_collections().await {
         Ok(_) => ComponentHealth {
             status: "ok",
-            latency_ms: q
-                .elapsed()
-                .as_millis(),
+            latency_ms: q.elapsed().as_millis(),
             error: None,
         },
         Err(e) => {
             warn!("health: qdrant check failed: {e}");
             ComponentHealth {
                 status: "down",
-                latency_ms: q
-                    .elapsed()
-                    .as_millis(),
+                latency_ms: q.elapsed().as_millis(),
                 error: Some(e.to_string()),
             }
-        }
+        },
     };
 
     let healthy = turso.status == "ok" && qdrant.status == "ok";

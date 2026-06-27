@@ -50,18 +50,12 @@ impl ContractSkeleton {
                 s.name, s.size, s.signature
             ));
         }
-        if !self
-            .storage_layout
-            .is_empty()
-        {
+        if !self.storage_layout.is_empty() {
             out.push_str("\nSTATE VARIABLES:\n");
             out.push_str(&self.storage_layout);
             out.push('\n');
         }
-        if !self
-            .file_decls
-            .is_empty()
-        {
+        if !self.file_decls.is_empty() {
             out.push_str("\nFILE-LEVEL DECLARATIONS:\n");
             out.push_str(&self.file_decls);
             out.push('\n');
@@ -96,10 +90,7 @@ pub(crate) fn analyze_contract(source: &str) -> ContractSkeleton {
         if let Loc::File(_, s, e) = loc
             && let Some(t) = source.get(s..e)
         {
-            decls.push(
-                t.trim()
-                    .to_string(),
-            );
+            decls.push(t.trim().to_string());
         }
     };
 
@@ -114,10 +105,7 @@ pub(crate) fn analyze_contract(source: &str) -> ContractSkeleton {
                 .name
                 .identifiers
                 .iter()
-                .map(|id| {
-                    id.name
-                        .to_lowercase()
-                })
+                .map(|id| id.name.to_lowercase())
                 .collect::<Vec<_>>()
                 .join(".");
             if category.is_none() {
@@ -137,19 +125,13 @@ pub(crate) fn analyze_contract(source: &str) -> ContractSkeleton {
                     if let Loc::File(_, start, end) = var.loc
                         && let Some(text) = source.get(start..end)
                     {
-                        let decl = text
-                            .trim()
-                            .to_string();
+                        let decl = text.trim().to_string();
                         if let Some(name) = &var.name {
-                            state_var_defs.push((
-                                name.name
-                                    .clone(),
-                                decl.clone(),
-                            ));
+                            state_var_defs.push((name.name.clone(), decl.clone()));
                         }
                         storage_vars.push(decl);
                     }
-                }
+                },
                 // File-level dependencies a function may reference — context only.
                 ContractPart::StructDefinition(d) => push_decl(d.loc, &mut decls),
                 ContractPart::EnumDefinition(d) => push_decl(d.loc, &mut decls),
@@ -180,32 +162,21 @@ pub(crate) fn analyze_contract(source: &str) -> ContractSkeleton {
                     // Signature = header up to the body's opening brace.
                     let signature = func_text
                         .split_once('{')
-                        .map(|(h, _)| {
-                            h.trim()
-                                .to_string()
-                        })
-                        .unwrap_or_else(|| {
-                            func_text
-                                .trim()
-                                .to_string()
-                        });
+                        .map(|(h, _)| h.trim().to_string())
+                        .unwrap_or_else(|| func_text.trim().to_string());
                     signatures.push(FnSig {
-                        name: name_ident
-                            .name
-                            .clone(),
+                        name: name_ident.name.clone(),
                         signature,
                         size: end.saturating_sub(start),
                     });
                     functions.push(FunctionInfo {
-                        name: name_ident
-                            .name
-                            .clone(),
+                        name: name_ident.name.clone(),
                         source: func_text.to_string(),
                         start,
                         end,
                     });
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -235,9 +206,7 @@ fn build_slot_guide(vars: &[(String, String)]) -> String {
          VERBATIM (use the `.slot` accessor; ignore any slot scheme from the retrieved patterns):\n",
     );
     for (name, decl) in vars {
-        let depth = decl
-            .matches("mapping(")
-            .count();
+        let depth = decl.matches("mapping(").count();
         let line = match depth {
             0 => format!(
                 "- {name} (value type): read sload({name}.slot), write sstore({name}.slot, v)"
@@ -248,7 +217,9 @@ fn build_slot_guide(vars: &[(String, String)]) -> String {
             2 => format!(
                 "- {name}[k1][k2]: mstore(0x00, k1); mstore(0x20, {name}.slot); let inner := keccak256(0x00, 0x40); mstore(0x00, k2); mstore(0x20, inner); let s := keccak256(0x00, 0x40)"
             ),
-            _ => format!("- {name}: deep mapping — derive each level as keccak256(key ++ parentSlot)"),
+            _ => format!(
+                "- {name}: deep mapping — derive each level as keccak256(key ++ parentSlot)"
+            ),
         };
         out.push_str(&line);
         out.push('\n');

@@ -6,10 +6,15 @@ use qdrant_client::Qdrant;
 use rig_core::providers::deepseek;
 use tracing::warn;
 
-use crate::ai::Embedder;
-use crate::db::{Turso, TursoArg};
-use crate::dto::OptimizeResponse;
-use crate::{logging, normalize};
+use crate::{
+    api::dto::OptimizeResponse,
+    kb::{
+        ai::Embedder,
+        db::{Turso, TursoArg},
+        normalize,
+    },
+    logging,
+};
 
 // ── constants ─────────────────────────────────────────────────────────────────
 pub(crate) const COLLECTION: &str = "gaslite_patterns";
@@ -42,10 +47,7 @@ pub(crate) struct AppState {
 }
 
 /// L2 cache read — fetch a stored optimization from Turso by normalized key.
-pub(crate) async fn db_cache_get(
-    db: &Turso,
-    key: &str,
-) -> Option<OptimizeResponse> {
+pub(crate) async fn db_cache_get(db: &Turso, key: &str) -> Option<OptimizeResponse> {
     let rows = db
         .query(
             "SELECT response FROM optimize_cache WHERE cache_key = ?",
@@ -53,10 +55,7 @@ pub(crate) async fn db_cache_get(
         )
         .await
         .ok()?;
-    let json = rows
-        .first()?
-        .get("response")?
-        .as_str()?;
+    let json = rows.first()?.get("response")?.as_str()?;
     serde_json::from_str::<OptimizeResponse>(json).ok()
 }
 
@@ -95,20 +94,12 @@ pub(crate) async fn load_pattern_matcher(db: &Turso) -> normalize::PatternMatche
         Err(e) => {
             warn!("pattern matcher: KB query failed: {e}");
             return normalize::PatternMatcher::default();
-        }
+        },
     };
-    let pairs = rows
-        .into_iter()
-        .filter_map(|row| {
-            let id = row
-                .get("id")?
-                .as_str()?
-                .to_string();
-            let before = row
-                .get("solidity_before")?
-                .as_str()?
-                .to_string();
-            Some((id, before))
-        });
+    let pairs = rows.into_iter().filter_map(|row| {
+        let id = row.get("id")?.as_str()?.to_string();
+        let before = row.get("solidity_before")?.as_str()?.to_string();
+        Some((id, before))
+    });
     normalize::PatternMatcher::build(pairs)
 }

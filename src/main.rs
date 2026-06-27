@@ -1,38 +1,26 @@
 //TODO erc1155
 
-mod admin;
-mod ai;
-mod analyze;
-mod db;
-mod dto;
-mod embedding;
-mod forge;
-mod health;
+mod agent;
+mod api;
+mod kb;
 mod logging;
-mod normalize;
-mod optimize;
-mod orchestrator;
-mod retrieval;
-mod rig_agent;
 mod state;
-mod tools;
 mod utils;
-mod verify_agent;
+mod verify;
 
-use ai::Embedder;
-use db::Turso;
-use state::{AppState, COLLECTION, VECTOR_DIM};
+use std::sync::Arc;
 
 use axum::{
     Router,
     routing::{get, post},
 };
+use kb::{ai::Embedder, db::Turso};
 use qdrant_client::{
     Qdrant,
     qdrant::{CreateCollectionBuilder, Distance, VectorParamsBuilder},
 };
 use rig_core::{client::ProviderClient, providers::deepseek};
-use std::sync::Arc;
+use state::{AppState, COLLECTION, VECTOR_DIM};
 use tracing::{info, warn};
 
 #[tokio::main]
@@ -68,23 +56,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Failed to list Qdrant collections");
 
-    if !existing
-        .collections
-        .iter()
-        .any(|c| c.name == COLLECTION)
-    {
+    if !existing.collections.iter().any(|c| c.name == COLLECTION) {
         qdrant
             .create_collection(
-                CreateCollectionBuilder::new(COLLECTION).vectors_config(VectorParamsBuilder::new(
-                    VECTOR_DIM,
-                    Distance::Cosine,
-                )),
+                CreateCollectionBuilder::new(COLLECTION)
+                    .vectors_config(VectorParamsBuilder::new(VECTOR_DIM, Distance::Cosine)),
             )
             .await
             .expect("Failed to create Qdrant collection");
     }
 
-    let forge_available = forge::forge_available();
+    let forge_available = verify::forge::forge_available();
     if forge_available {
         info!("forge detected — closed-loop refinement enabled");
     } else {
@@ -92,19 +74,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let state = Arc::new(AppState {
-        db: Arc::new(Turso::new(
-            http,
-            turso_url,
-            turso_token,
-        )),
+        db: Arc::new(Turso::new(http, turso_url, turso_token)),
         qdrant: Arc::new(qdrant),
         deepseek,
         embedder,
         forge_available,
         cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        pattern_matcher: std::sync::RwLock::new(Arc::new(
-            normalize::PatternMatcher::default(),
-        )),
+        pattern_matcher: std::sync::RwLock::new(Arc::new(kb::normalize::PatternMatcher::default())),
         logging: Arc::new(logging::NoopSink),
     });
 
@@ -150,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("optimize_cache migration failed");
 
-    admin::create_qdrant_indexes(&state)
+    api::admin::create_qdrant_indexes(&state)
         .await
         .expect("Failed to create Qdrant indexes");
 
@@ -165,39 +141,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 matcher.len()
             );
         }
-        *state
-            .pattern_matcher
-            .write()
-            .unwrap() = Arc::new(matcher);
+        *state.pattern_matcher.write().unwrap() = Arc::new(matcher);
     }
 
     let router = Router::new()
-        .route("/health", get(health::health_check))
-        .route(
-            "/api/optimize",
-            post(optimize::optimize_contract),
-        )
-        .route(
-            "/api/verify",
-            post(forge::verify_contract),
-        )
+        .route("/health", get(api::health::health_check))
+        .route("/api/optimize", post(api::optimize::optimize_contract))
+        .route("/api/verify", post(verify::forge::verify_contract))
         .route(
             "/api/admin/ingest-local",
-            post(admin::ingest_local_files),
+            post(api::admin::ingest_local_files),
         )
         .route(
             "/api/admin/qdrant/reset",
-            post(admin::reset_collection),
+            post(api::admin::reset_collection),
         )
         .with_state(state)
         // Allow the browser-based web UI (different origin) to call the API.
         .layer(cors_layer());
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-    info!(
-        "Gaslite listening on {}",
-        listener.local_addr()?
-    );
+    info!("Gaslite listening on {}", listener.local_addr()?);
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -207,21 +171,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `CORS_ALLOW_ORIGINS` (e.g. "https://gaslite.example,https://foo.bar").
 fn cors_layer() -> tower_http::cors::CorsLayer {
     use tower_http::cors::{Any, CorsLayer};
-    let base = CorsLayer::new()
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let base = CorsLayer::new().allow_methods(Any).allow_headers(Any);
     match std::env::var("CORS_ALLOW_ORIGINS") {
         Ok(list) if !list.trim().is_empty() => {
             let origins: Vec<axum::http::HeaderValue> = list
                 .split(',')
-                .filter_map(|o| {
-                    o.trim()
-                        .parse()
-                        .ok()
-                })
+                .filter_map(|o| o.trim().parse().ok())
                 .collect();
             base.allow_origin(origins)
-        }
+        },
         _ => base.allow_origin(Any),
     }
 }

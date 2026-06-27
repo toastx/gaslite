@@ -9,9 +9,7 @@
 //!
 //! One agent per function — these are generated concurrently (one thread each).
 
-use rig_core::client::CompletionClient;
-use rig_core::completion::Prompt;
-use rig_core::providers::deepseek;
+use rig_core::{client::CompletionClient, completion::Prompt, providers::deepseek};
 
 use crate::utils::strip_code_fences;
 
@@ -214,7 +212,7 @@ pub async fn gen_equivalence_test(
     );
 
     let result = client
-        .agent(crate::rig_agent::MODEL)
+        .agent(super::rig_agent::MODEL)
         .preamble(VERIFY_SYSTEM_PROMPT)
         .context(&context)
         .temperature(0.0)

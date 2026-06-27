@@ -141,18 +141,10 @@ fn is_builtin(id: &str) -> bool {
 
 /// Tokenize `src`, mapping each token to a canonical string. Comments are dropped
 /// by the lexer. When `structural`, identifiers/literals are abstracted.
-fn canon_tokens(
-    src: &str,
-    structural: bool,
-) -> Vec<String> {
+fn canon_tokens(src: &str, structural: bool) -> Vec<String> {
     let mut comments: Vec<Comment> = Vec::new();
     let mut errors = Vec::new();
-    let lexer = Lexer::new(
-        src,
-        0,
-        &mut comments,
-        &mut errors,
-    );
+    let lexer = Lexer::new(src, 0, &mut comments, &mut errors);
 
     // solang-parser's Lexer yields `(usize, Token, usize)` directly; lexical
     // errors are collected into `errors`, so there is nothing to unwrap here.
@@ -165,7 +157,7 @@ fn canon_tokens(
                 Token::Identifier(id) if !is_builtin(id) => "ID".to_string(),
                 Token::Number(..) | Token::RationalNumber(..) | Token::HexNumber(..) => {
                     "NUM".to_string()
-                }
+                },
                 Token::StringLiteral(..) => "STR".to_string(),
                 Token::HexLiteral(..) => "HEX".to_string(),
                 Token::AddressLiteral(..) => "ADDR".to_string(),
@@ -205,31 +197,23 @@ impl PatternMatcher {
             let toks = canon_tokens(&before, true);
             if toks.len() >= MIN_TEMPLATE_TOKENS {
                 // Pad so matching respects token boundaries.
-                templates.push((
-                    id,
-                    format!(" {} ", toks.join(" ")),
-                ));
+                templates.push((id, format!(" {} ", toks.join(" "))));
             }
         }
         Self { templates }
     }
 
     pub fn len(&self) -> usize {
-        self.templates
-            .len()
+        self.templates.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.templates
-            .is_empty()
+        self.templates.is_empty()
     }
 
     /// Pattern ids whose structural template appears in `fn_src` (capped at
     /// [`MAX_STRUCT_MATCHES`]).
-    pub fn match_function(
-        &self,
-        fn_src: &str,
-    ) -> Vec<String> {
+    pub fn match_function(&self, fn_src: &str) -> Vec<String> {
         let hay = format!(" {} ", structural(fn_src));
         self.templates
             .iter()

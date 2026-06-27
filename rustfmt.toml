@@ -1,10 +1,19 @@
+# Language edition (parsing) + style guide edition (formatting rules).
 edition = "2024"
+style_edition = "2024"
+max_width = 100
+
+# Imports: one merged `use` per crate, grouped std → external → crate.
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+
+# Comments: wrap to width and format code samples inside doc comments.
+wrap_comments = true
 comment_width = 100
 format_code_in_doc_comments = true
-imports_granularity = "Crate"
-imports_layout = "Horizontal"
-wrap_comments = true
-brace_style = "SameLineWhere"
-fn_params_layout = "Vertical"
-fn_call_width = 30
-chain_width = 1
+
+# Tidy-ups.
+use_field_init_shorthand = true
+reorder_impl_items = true
+match_block_trailing_comma = true
+overflow_delimited_expr = true

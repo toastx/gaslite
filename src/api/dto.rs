@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::forge;
+use crate::verify::forge;
 
 #[derive(Deserialize)]
 pub(crate) struct OptimizeRequest {

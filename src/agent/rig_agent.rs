@@ -19,8 +19,8 @@ use rig_core::{
 };
 use tracing::info;
 
-
-use crate::{retrieval::GasliteIndex, tools::FunctionForgeTool, utils::strip_code_fences};
+use super::tools::FunctionForgeTool;
+use crate::{kb::retrieval::GasliteIndex, utils::strip_code_fences};
 
 /// The single model id used by every agent (router, oneshot, per-function, verify).
 /// `deepseek-chat` is the **non-thinking** mode of `deepseek-v4-flash` — it skips the
@@ -151,9 +151,7 @@ pub async fn optimize_function(
     let hook = TimingHook::new(fn_name);
     let result = if use_forge {
         builder
-            .tool(FunctionForgeTool::new(
-                original, fn_start, fn_end,
-            ))
+            .tool(FunctionForgeTool::new(original, fn_start, fn_end))
             .build()
             .prompt(user)
             .with_hook(hook.clone())
@@ -196,10 +194,7 @@ pub async fn optimize_function(
 
 /// Render the file-level declarations block for agent context (empty when none).
 fn decls_block(file_decls: &str) -> String {
-    if file_decls
-        .trim()
-        .is_empty()
-    {
+    if file_decls.trim().is_empty() {
         String::new()
     } else {
         format!(
@@ -282,45 +277,26 @@ impl TimingHook {
     fn new(label: &str) -> Self {
         Self {
             label: Arc::from(label),
-            state: Arc::new(Mutex::new(
-                TurnTimer::default(),
-            )),
+            state: Arc::new(Mutex::new(TurnTimer::default())),
             captured: Arc::new(Mutex::new(None)),
         }
     }
 
     /// `(turns, total LLM time, total in-loop tool time)`.
     fn summary(&self) -> (usize, Duration, Duration) {
-        let s = self
-            .state
-            .lock()
-            .unwrap();
-        (
-            s.turn,
-            s.llm_total,
-            s.tool_total,
-        )
+        let s = self.state.lock().unwrap();
+        (s.turn, s.llm_total, s.tool_total)
     }
 
     /// The verified candidate captured on early exit, if any.
     fn captured(&self) -> Option<String> {
-        self.captured
-            .lock()
-            .unwrap()
-            .clone()
+        self.captured.lock().unwrap().clone()
     }
 }
 
 impl<M: CompletionModel> PromptHook<M> for TimingHook {
-    async fn on_completion_call(
-        &self,
-        _prompt: &Message,
-        _history: &[Message],
-    ) -> HookAction {
-        let mut s = self
-            .state
-            .lock()
-            .unwrap();
+    async fn on_completion_call(&self, _prompt: &Message, _history: &[Message]) -> HookAction {
+        let mut s = self.state.lock().unwrap();
         s.turn += 1;
         s.llm_start = Some(Instant::now());
         HookAction::cont()
@@ -331,22 +307,13 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         _prompt: &Message,
         _response: &CompletionResponse<M::Response>,
     ) -> HookAction {
-        let mut s = self
-            .state
-            .lock()
-            .unwrap();
-        if let Some(start) = s
-            .llm_start
-            .take()
-        {
+        let mut s = self.state.lock().unwrap();
+        if let Some(start) = s.llm_start.take() {
             let d = start.elapsed();
             s.llm_total += d;
             let turn = s.turn;
             drop(s);
-            info!(
-                "  [{}] turn {turn}: LLM {d:.2?}",
-                self.label
-            );
+            info!("  [{}] turn {turn}: LLM {d:.2?}", self.label);
         }
         HookAction::cont()
     }
@@ -358,10 +325,7 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         _internal_call_id: &str,
         _args: &str,
     ) -> ToolCallHookAction {
-        self.state
-            .lock()
-            .unwrap()
-            .tool_start = Some(Instant::now());
+        self.state.lock().unwrap().tool_start = Some(Instant::now());
         ToolCallHookAction::cont()
     }
 
@@ -374,22 +338,13 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         result: &str,
     ) -> HookAction {
         {
-            let mut s = self
-                .state
-                .lock()
-                .unwrap();
-            if let Some(start) = s
-                .tool_start
-                .take()
-            {
+            let mut s = self.state.lock().unwrap();
+            if let Some(start) = s.tool_start.take() {
                 let d = start.elapsed();
                 s.tool_total += d;
                 let turn = s.turn;
                 drop(s);
-                info!(
-                    "  [{}] turn {turn}: tool {tool_name} {d:.2?}",
-                    self.label
-                );
+                info!("  [{}] turn {turn}: tool {tool_name} {d:.2?}", self.label);
             }
         }
 
@@ -412,10 +367,7 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
                     .and_then(|v| v.get("optimized_function"))
                     .and_then(|x| x.as_str());
                 if let Some(f) = func {
-                    *self
-                        .captured
-                        .lock()
-                        .unwrap() = Some(strip_code_fences(f));
+                    *self.captured.lock().unwrap() = Some(strip_code_fences(f));
                     return HookAction::terminate("forge_verify compiled — skipping final turn");
                 }
             }
@@ -424,4 +376,3 @@ impl<M: CompletionModel> PromptHook<M> for TimingHook {
         HookAction::cont()
     }
 }
-
