@@ -11,6 +11,10 @@ use std::{
     sync::OnceLock,
     time::{Duration, Instant},
 };
+use solang_parser::pt::{
+    CodeLocation, ContractPart, FunctionTy, Loc, SourceUnitPart, StructDefinition,
+};
+use std::collections::{HashMap, HashSet};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -248,99 +252,150 @@ fn build_gas_test(
 /// "" for a parameterless or absent constructor. The optimizer never changes the
 /// constructor signature, so the original's args work for both contracts.
 fn synthesize_constructor_args(source: &str) -> String {
+    // Enums/structs declared in the source, so a user-defined type resolves to a
+    // valid literal (`Enum(0)`, `Struct(field defaults…)`) instead of a bogus
+    // `Type(address(0))` cast that fails to compile.
+    let types = collect_sol_types(source);
     match extract_constructor_params(source) {
         Some(params) => params
             .iter()
-            .map(|t| default_literal_for_type(t))
+            .map(|t| default_literal_for_type(t, &types, 0))
             .collect::<Vec<_>>()
             .join(", "),
         None => String::new(),
     }
 }
 
-/// Extract the constructor's parameter TYPES (data location + name stripped) from
-/// the source. `None` = no constructor; `Some(vec![])` = constructor with no params.
-fn extract_constructor_params(source: &str) -> Option<Vec<String>> {
-    // Find a `constructor` keyword that is immediately followed (modulo whitespace)
-    // by `(` — i.e. the definition, not a mention in a comment/string.
-    let mut search = 0;
-    let open = loop {
-        let rel = source[search..].find("constructor")?;
-        let kw = search + rel;
-        let after = kw + "constructor".len();
-        let before_boundary = kw == 0
-            || !matches!(source.as_bytes()[kw - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_');
-        let rest = source[after..].trim_start();
-        if before_boundary && rest.starts_with('(') {
-            break after + source[after..].find('(')?;
-        }
-        search = after;
-    };
+/// User-defined types declared in the contract source, so constructor-arg
+/// synthesis can emit a compilable literal for enum/struct parameters.
+#[derive(Default)]
+struct SolTypes {
+    /// Enum type names (any member → the `Enum(0)` int-conversion literal).
+    enums: HashSet<String>,
+    /// Struct name → its field TYPES (in declaration order), for `Struct(a, b, …)`.
+    structs: HashMap<String, Vec<String>>,
+}
 
-    // Walk to the matching close paren.
-    let mut depth = 0i32;
-    let mut close = None;
-    for (i, ch) in source[open..].char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(open + i);
-                    break;
+/// Parse the source once and index every enum/struct declared at file or contract
+/// level. Best-effort: a parse failure yields an empty registry (falls back to the
+/// contract/interface literal path).
+fn collect_sol_types(source: &str) -> SolTypes {
+    let mut t = SolTypes::default();
+    let Ok((su, _)) = solang_parser::parse(source, 0) else {
+        return t;
+    };
+    for part in &su.0 {
+        match part {
+            SourceUnitPart::EnumDefinition(e) => {
+                if let Some(n) = &e.name {
+                    t.enums
+                        .insert(n.name.clone());
+                }
+            }
+            SourceUnitPart::StructDefinition(s) => collect_struct(source, s, &mut t),
+            SourceUnitPart::ContractDefinition(def) => {
+                for cp in &def.parts {
+                    match cp {
+                        ContractPart::EnumDefinition(e) => {
+                            if let Some(n) = &e.name {
+                                t.enums
+                                    .insert(n.name.clone());
+                            }
+                        }
+                        ContractPart::StructDefinition(s) => collect_struct(source, s, &mut t),
+                        _ => {}
+                    }
                 }
             }
             _ => {}
         }
     }
-    let inner = &source[open + 1..close?];
-    if inner
-        .trim()
-        .is_empty()
-    {
-        return Some(vec![]);
-    }
+    t
+}
 
-    // Split on top-level commas (ignoring nested generics/arrays/tuples).
-    let mut params: Vec<String> = Vec::new();
-    let mut depth = 0i32;
-    let mut cur = String::new();
-    for ch in inner.chars() {
-        match ch {
-            '(' | '[' | '<' => {
-                depth += 1;
-                cur.push(ch);
-            }
-            ')' | ']' | '>' => {
-                depth -= 1;
-                cur.push(ch);
-            }
-            ',' if depth == 0 => {
-                params.push(
-                    cur.trim()
-                        .to_string(),
-                );
-                cur.clear();
-            }
-            _ => cur.push(ch),
-        }
-    }
-    if !cur
-        .trim()
-        .is_empty()
-    {
-        params.push(
-            cur.trim()
-                .to_string(),
-        );
-    }
+/// Record a struct's field types (as source text) under its name.
+fn collect_struct(
+    source: &str,
+    s: &StructDefinition,
+    t: &mut SolTypes,
+) {
+    let Some(name) = &s.name else { return };
+    let fields = s
+        .fields
+        .iter()
+        .filter_map(|f| type_text_of(source, f.ty.loc()))
+        .collect();
+    t.structs
+        .insert(name.name.clone(), fields);
+}
 
-    Some(
-        params
+/// The trimmed source text spanned by `loc` (a type expression), if it is a file span.
+fn type_text_of(
+    source: &str,
+    loc: Loc,
+) -> Option<String> {
+    if let Loc::File(_, s, e) = loc {
+        source
+            .get(s..e)
+            .map(|x| {
+                x.trim()
+                    .to_string()
+            })
+    } else {
+        None
+    }
+}
+
+/// Extract the constructor's parameter TYPES (data location + name stripped) from
+/// the source via the AST. `None` = no constructor anywhere; `Some(vec![])` =
+/// constructor with no params.
+///
+/// Working from the parsed tree (not a text scan) means a `constructor(...)`
+/// mention inside a comment or string can never be misread as the real definition.
+/// The target contract (the one the sandbox instantiates — see
+/// [`extract_sol_contract_name`]) is preferred; any other contract's constructor is
+/// a fallback, which is also the right choice when the target inherits its ctor.
+fn extract_constructor_params(source: &str) -> Option<Vec<String>> {
+    let (su, _) = solang_parser::parse(source, 0).ok()?;
+    let target = extract_sol_contract_name(source);
+    let mut fallback: Option<Vec<String>> = None;
+
+    for part in &su.0 {
+        let SourceUnitPart::ContractDefinition(def) = part else {
+            continue;
+        };
+        let Some(ctor) = def
+            .parts
             .iter()
-            .map(|p| param_type(p))
-            .collect(),
-    )
+            .find_map(|cp| {
+                let ContractPart::FunctionDefinition(f) = cp else {
+                    return None;
+                };
+                matches!(f.ty, FunctionTy::Constructor).then(|| {
+                    f.params
+                        .iter()
+                        .filter_map(|(loc, p)| {
+                            p.as_ref()?;
+                            type_text_of(source, *loc).map(|txt| param_type(&txt))
+                        })
+                        .collect::<Vec<String>>()
+                })
+            })
+        else {
+            continue;
+        };
+
+        let is_target = matches!(
+            (&def.name, &target),
+            (Some(n), Some(t)) if &n.name == t
+        );
+        if is_target {
+            return Some(ctor);
+        }
+        fallback.get_or_insert(ctor);
+    }
+
+    fallback
 }
 
 /// Reduce a constructor parameter (`address payable _to`) to just its type
@@ -358,14 +413,62 @@ fn param_type(param: &str) -> String {
     }
 }
 
+/// Bound on struct-nesting expansion, so a (pathological) recursive/deeply nested
+/// struct can't blow the stack or emit an enormous literal.
+const MAX_STRUCT_DEPTH: usize = 4;
+
+/// Split a fixed-size array type `T[N]` into `(T, N)`. Dynamic arrays (`T[]`) and
+/// non-arrays return `None`.
+fn parse_fixed_array(t: &str) -> Option<(&str, usize)> {
+    let open = t.rfind('[')?;
+    let close = t
+        .strip_suffix(']')?
+        .len();
+    let n: usize = t[open + 1..close]
+        .trim()
+        .parse()
+        .ok()?;
+    Some((t[..open].trim(), n))
+}
+
+/// A single element literal for a fixed-size array. Numeric elements are cast to
+/// their declared type (`uint256(0)`) so the array literal infers the right element
+/// type rather than defaulting to `uint8`.
+fn array_element_literal(
+    inner: &str,
+    types: &SolTypes,
+    depth: usize,
+) -> String {
+    let inner = inner.trim();
+    if inner.starts_with("uint") || inner.starts_with("int") {
+        format!("{inner}(0)")
+    } else {
+        default_literal_for_type(inner, types, depth)
+    }
+}
+
 /// A default literal for a Solidity type, used to fill a constructor call. Covers
-/// the common primitives, arrays and contract/interface types; falls back to `0`.
-fn default_literal_for_type(ty: &str) -> String {
+/// the common primitives, arrays, enums, structs and contract/interface types;
+/// falls back to `0`. `types` resolves user-defined enum/struct names; `depth`
+/// bounds struct-field recursion.
+fn default_literal_for_type(
+    ty: &str,
+    types: &SolTypes,
+    depth: usize,
+) -> String {
     let t = ty.trim();
     if let Some(inner) = t.strip_suffix("[]") {
         return format!(
             "new {}[](0)",
             inner.trim()
+        );
+    }
+    // Fixed-size array `T[N]` → an N-element array literal of default elements.
+    if let Some((inner, n)) = parse_fixed_array(t) {
+        let elem = array_element_literal(inner, types, depth);
+        return format!(
+            "[{}]",
+            vec![elem; n].join(", ")
         );
     }
     if t.contains("payable") {
@@ -386,6 +489,26 @@ fn default_literal_for_type(ty: &str) -> String {
             .is_ok()
     {
         return format!("{t}(0)");
+    }
+    // User-defined enum → explicit int-to-enum conversion (every enum has member 0).
+    if types
+        .enums
+        .contains(t)
+    {
+        return format!("{t}(0)");
+    }
+    // User-defined struct → construct it from per-field default literals.
+    if let Some(fields) = types
+        .structs
+        .get(t)
+        && depth < MAX_STRUCT_DEPTH
+    {
+        let args = fields
+            .iter()
+            .map(|f| default_literal_for_type(f, types, depth + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("{t}({args})");
     }
     // Contract/interface types (PascalCase) — cast the zero address.
     if t.chars()
@@ -940,7 +1063,6 @@ fn parse_gas_report(
     orig_name: &str,
     opt_name: &str,
 ) -> Vec<FunctionGas> {
-    use std::collections::HashMap;
     let mut orig: HashMap<String, u64> = HashMap::new();
     let mut opt: HashMap<String, u64> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
@@ -1132,6 +1254,53 @@ mod tests {
         // No real constructor; a function whose name contains "constructor".
         let src = "contract C { function reconstructor() public {} }";
         assert_eq!(synthesize_constructor_args(src), "");
+    }
+
+    #[test]
+    fn ctor_keyword_in_comment_is_ignored() {
+        // A `constructor(...)` mention in a comment must not be parsed as the real
+        // definition — the AST only sees the actual constructor.
+        let src = "contract C {\n // fake note: constructor(address evil)\n \
+                   constructor(uint256 x) {} }";
+        assert_eq!(synthesize_constructor_args(src), "0");
+    }
+
+    #[test]
+    fn ctor_args_enum_uses_int_literal() {
+        let src = "contract C { enum Status { Active, Paused } constructor(Status s) {} }";
+        assert_eq!(
+            synthesize_constructor_args(src),
+            "Status(0)"
+        );
+    }
+
+    #[test]
+    fn ctor_args_struct_expands_to_field_defaults() {
+        let src = "contract C { struct P { uint256 a; address b; bool c; } \
+                   constructor(P memory p) {} }";
+        assert_eq!(
+            synthesize_constructor_args(src),
+            "P(0, address(0), false)"
+        );
+    }
+
+    #[test]
+    fn ctor_args_fixed_size_array() {
+        let src = "contract C { constructor(uint256[3] memory xs) {} }";
+        assert_eq!(
+            synthesize_constructor_args(src),
+            "[uint256(0), uint256(0), uint256(0)]"
+        );
+    }
+
+    #[test]
+    fn ctor_args_nested_struct_and_enum() {
+        let src = "contract C { enum E { A } struct S { E e; uint8 n; } \
+                   constructor(S memory s) {} }";
+        assert_eq!(
+            synthesize_constructor_args(src),
+            "S(E(0), 0)"
+        );
     }
 
     #[test]
