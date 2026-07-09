@@ -529,12 +529,18 @@ fn forge_sandbox_inner(
 /// fails the sanity suite is a broken test (bad preconditions, wrong arithmetic),
 /// not a finding — it is reported in `invalid` and excluded from gating, so a
 /// buggy generated test can never falsely reject a good optimization.
+///
+/// A function is only PROVEN equivalent when it has a test that passed both
+/// suites. `invalid` (broken test) and `missing` (no test at all) are both
+/// *absence of proof*, not proof of correctness — [`EquivResult::unverified`]
+/// unions them, and the caller must surface that set rather than silently
+/// counting only the tests that happened to exist.
 #[derive(Debug, Default)]
 pub struct EquivResult {
     pub compiles: bool,
     pub errors: Vec<String>,
     /// True only when it compiled, at least one valid test ran, and every valid
-    /// test passed.
+    /// test passed. Says NOTHING about coverage — check `unverified()` too.
     pub all_passed: bool,
     /// Function names with a GENUINE behavioural divergence (sanity passed,
     /// equivalence failed).
@@ -545,6 +551,11 @@ pub struct EquivResult {
     /// For each broken test, the sanity-suite `[FAIL...]` line (revert reason) —
     /// fed back to the verify agent when regenerating the test.
     pub invalid_reasons: std::collections::HashMap<String, String>,
+    /// Target functions for which no equivalence test was ever generated (the
+    /// verify agent errored or returned an empty body). Filled in by the caller:
+    /// `equivalence_inner` only ever sees the tests that DO exist, so it cannot
+    /// know what is absent.
+    pub missing: Vec<String>,
     /// Number of tests that were valid (passed sanity) and therefore counted.
     pub valid_count: usize,
     pub gas_original: Option<u64>,
@@ -553,6 +564,19 @@ pub struct EquivResult {
     /// Real per-function runtime gas (original vs optimized), from `--gas-report`.
     pub per_function_gas: Vec<FunctionGas>,
     pub forge_output: String,
+}
+
+impl EquivResult {
+    /// Target functions with no valid passing equivalence test — broken tests
+    /// (`invalid`) plus never-generated ones (`missing`). Both mean "we did not
+    /// prove this function equivalent"; the two sets are disjoint by construction.
+    pub fn unverified(&self) -> Vec<String> {
+        let mut out = self.invalid.clone();
+        out.extend(self.missing.iter().cloned());
+        out.sort();
+        out.dedup();
+        out
+    }
 }
 
 /// Assemble the differential test file. Two suites share the same generated
@@ -759,6 +783,8 @@ fn equivalence_inner(
         failed,
         invalid,
         invalid_reasons,
+        // Only the caller knows the full target list; it fills this in.
+        missing: Vec::new(),
         valid_count,
         gas_original,
         gas_optimized,
@@ -947,6 +973,21 @@ mod tests {
         // No real constructor; a function whose name contains "constructor".
         let src = "contract C { function reconstructor() public {} }";
         assert_eq!(synthesize_constructor_args(src), "");
+    }
+
+    #[test]
+    fn unverified_unions_broken_and_missing_tests() {
+        let er = EquivResult {
+            invalid: vec!["transfer".into()],
+            missing: vec!["approve".into(), "mint".into()],
+            ..Default::default()
+        };
+        assert_eq!(er.unverified(), vec!["approve", "mint", "transfer"]);
+    }
+
+    #[test]
+    fn unverified_is_empty_when_every_function_was_tested() {
+        assert!(EquivResult::default().unverified().is_empty());
     }
 
     #[test]

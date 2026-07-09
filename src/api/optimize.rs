@@ -130,11 +130,27 @@ async fn fan_out_functions(
 
 /// Behavioural verification: generate a differential equivalence test per function
 /// (one thread each), then run them all in one forge harness. The optimized contract
-/// is accepted only if it compiles AND every function behaves identically to the
-/// original — which construction-gas measurement alone cannot prove.
-/// How many times broken (sanity-failing) tests are regenerated with feedback
-/// before we give up and report those functions as unverified.
+/// is accepted only if it compiles AND every function that WAS tested behaves
+/// identically to the original — which construction-gas measurement alone cannot
+/// prove. Functions with no valid test are reported as unverified rather than
+/// silently counted as equivalent; see [`forge::EquivResult::unverified`].
+/// How many times broken (sanity-failing) or missing tests are regenerated with
+/// feedback before we give up and report those functions as unverified.
 const VERIFY_REGEN_ROUNDS: usize = 1;
+
+/// Target functions that have no generated test at all. A verify-agent call that
+/// errors or returns an empty body drops its function out of `test_fns` entirely,
+/// so without this the gate would only ever see the tests that happened to
+/// succeed and would report a 1-of-5 run as fully equivalent.
+fn missing_targets(targets: &[(String, String)], tested: &[String]) -> Vec<String> {
+    let have: std::collections::HashSet<&str> = tested.iter().map(|s| s.as_str()).collect();
+    targets
+        .iter()
+        .map(|(n, _)| n)
+        .filter(|n| !have.contains(n.as_str()))
+        .cloned()
+        .collect()
+}
 
 /// Generate `test_eq_*` bodies for `targets` concurrently (one task each).
 /// `feedback` maps a function name to `(previous test source, sanity failure)`
@@ -222,27 +238,34 @@ async fn behavioral_verify(
         return Err("no equivalence tests could be generated".to_string());
     }
 
-    // 2. Run the differential harness (build + all test_eq_* on a Mantle fork).
+    // 2. Run the differential harness (build + all test_eq_* on a Mantle fork). `ran` tracks the
+    //    test set that produced `er`, so a failed regen round can't make coverage look better than
+    //    the result we actually kept.
     let mut er = forge::run_equivalence_async(
         original_source.to_string(),
         optimized_code.to_string(),
         test_fns.clone(),
     )
     .await?;
+    let mut ran: Vec<String> = test_fns.iter().map(|(n, _)| n.clone()).collect();
 
-    // 3. Tests that failed the original-vs-original sanity suite are bugs in the TEST. Regenerate
-    //    just those, feeding each agent its own broken test plus the failure line, and re-run. A
-    //    failed regen round keeps the previous result, so retrying can only improve coverage, never
-    //    lose it.
+    // 3. Two kinds of function lack proof and both get another shot: tests that failed the
+    //    original-vs-original sanity suite are bugs in the TEST (regenerate with the failure line as
+    //    feedback), and targets whose generation failed outright have no test at all (regenerate
+    //    from scratch). A failed regen round keeps the previous result, so retrying can only improve
+    //    coverage, never lose it.
     for round in 1..=VERIFY_REGEN_ROUNDS {
-        if er.invalid.is_empty() {
+        let missing = missing_targets(targets, &ran);
+        if er.invalid.is_empty() && missing.is_empty() {
             break;
         }
         info!(
-            "  verify: regenerating {} broken test(s) with failure feedback (round {round})",
-            er.invalid.len()
+            "  verify: regenerating {} broken + {} missing test(s) (round {round})",
+            er.invalid.len(),
+            missing.len()
         );
 
+        // Feedback exists only for broken tests; a missing one is generated blind.
         let mut feedback: std::collections::HashMap<String, (String, String)> =
             std::collections::HashMap::new();
         for name in &er.invalid {
@@ -256,7 +279,7 @@ async fn behavioral_verify(
         }
         let regen_targets: Vec<(String, String)> = targets
             .iter()
-            .filter(|(n, _)| er.invalid.contains(n))
+            .filter(|(n, _)| er.invalid.contains(n) || missing.contains(n))
             .cloned()
             .collect();
 
@@ -275,8 +298,10 @@ async fn behavioral_verify(
             break;
         }
         for (name, body) in regenerated {
-            if let Some(slot) = test_fns.iter_mut().find(|(n, _)| *n == name) {
-                slot.1 = body;
+            match test_fns.iter_mut().find(|(n, _)| *n == name) {
+                // A broken test is replaced in place; a missing one is a new entry.
+                Some(slot) => slot.1 = body,
+                None => test_fns.push((name, body)),
             }
         }
 
@@ -287,7 +312,10 @@ async fn behavioral_verify(
         )
         .await
         {
-            Ok(new_er) => er = new_er,
+            Ok(new_er) => {
+                er = new_er;
+                ran = test_fns.iter().map(|(n, _)| n.clone()).collect();
+            },
             Err(e) => {
                 warn!("  verify: regen round failed ({e}) — keeping previous result");
                 break;
@@ -295,6 +323,8 @@ async fn behavioral_verify(
         }
     }
 
+    // 4. Record what was never tested, against the test set that produced `er`.
+    er.missing = missing_targets(targets, &ran);
     Ok(er)
 }
 
@@ -570,10 +600,16 @@ pub(crate) async fn optimize_contract(
                     .filter(|f| targets.contains(f.name.as_str()))
                     .cloned()
                     .collect();
-                if !er.invalid.is_empty() {
+                // Functions with no valid passing test: their test was broken, or it was
+                // never generated at all. Neither is evidence of equivalence.
+                let unverified = er.unverified();
+                if !unverified.is_empty() {
                     warn!(
-                        "  verify: {:?} had broken tests (failed sanity) — those functions are UNVERIFIED",
-                        er.invalid
+                        "  verify: {}/{} function(s) UNVERIFIED (broken tests: {:?}, no test generated: {:?})",
+                        unverified.len(),
+                        verify_targets.len(),
+                        er.invalid,
+                        er.missing,
                     );
                 }
                 info!(
@@ -585,22 +621,27 @@ pub(crate) async fn optimize_contract(
                     saved
                 );
                 analysis = format!(
-                    "Behaviourally equivalent to the original on {} differential test(s) on a \
-                     Mantle fork{}. Construction gas {} → {} (saved {}).",
+                    "Behaviourally equivalent to the original on {}/{} function(s) via differential \
+                     tests on a Mantle fork{}. Construction gas {} → {} (saved {}).",
                     er.valid_count,
-                    if er.invalid.is_empty() {
+                    verify_targets.len(),
+                    if unverified.is_empty() {
                         String::new()
                     } else {
                         format!(
-                            " (unverified — test generation failed: {})",
-                            er.invalid.join(", ")
+                            ". UNVERIFIED — no valid equivalence test could be generated for: {}",
+                            unverified.join(", ")
                         )
                     },
                     fmt_gas(er.gas_original),
                     fmt_gas(er.gas_optimized),
                     saved
                 );
-                cacheable = true;
+                // Only a fully proven rewrite is cached. A gap in coverage is a transient
+                // verify-agent failure, exactly like the compile/regression failures below —
+                // caching it would freeze an unproven result into the durable L2 store and
+                // serve it forever without ever retrying verification.
+                cacheable = unverified.is_empty();
             },
             // Equivalent but no construction-gas win → keep original.
             Ok(er) if er.compiles && er.all_passed => {
@@ -630,11 +671,11 @@ pub(crate) async fn optimize_contract(
                 cacheable = false;
             },
             // Compiled, no genuine failures, but no valid test ran either (every
-            // generated test was broken) → unverified, don't ship.
+            // generated test was broken or missing) → unverified, don't ship.
             Ok(er) if er.compiles => {
                 warn!(
-                    "  verify: no valid equivalence tests (all broken: {:?}) — keeping original",
-                    er.invalid
+                    "  verify: no valid equivalence tests (broken: {:?}, never generated: {:?}) — keeping original",
+                    er.invalid, er.missing
                 );
                 optimized_code = payload.contract_source.clone();
                 analysis = "Rewrite rejected — equivalence could not be established (test \
@@ -721,4 +762,39 @@ pub(crate) async fn optimize_contract(
     }
 
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn targets(names: &[&str]) -> Vec<(String, String)> {
+        names
+            .iter()
+            .map(|n| ((*n).to_string(), format!("function {n}()")))
+            .collect()
+    }
+
+    #[test]
+    fn missing_targets_reports_functions_with_no_generated_test() {
+        // The bug this guards: 4 of 5 verify agents fail, leaving one test that
+        // passes — which must NOT read as "the contract is equivalent".
+        let t = targets(&["mint", "burn", "transfer", "approve", "stake"]);
+        let missing = missing_targets(&t, &["mint".to_string()]);
+        assert_eq!(missing, vec!["burn", "transfer", "approve", "stake"]);
+    }
+
+    #[test]
+    fn missing_targets_is_empty_at_full_coverage() {
+        let t = targets(&["mint", "burn"]);
+        let tested = vec!["burn".to_string(), "mint".to_string()];
+        assert!(missing_targets(&t, &tested).is_empty());
+    }
+
+    #[test]
+    fn missing_targets_ignores_tests_for_unknown_functions() {
+        let t = targets(&["mint"]);
+        let tested = vec!["mint".to_string(), "someGetter".to_string()];
+        assert!(missing_targets(&t, &tested).is_empty());
+    }
 }
