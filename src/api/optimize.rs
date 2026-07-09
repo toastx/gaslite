@@ -546,10 +546,16 @@ pub(crate) async fn optimize_contract(
     // 4. Final authoritative gate: behavioural equivalence (differential tests vs the original on a
     //    Mantle fork) + a proven construction-gas win.
     let analysis: String;
-    // Whether the result is worth caching: a real optimization or a clean
-    // one-shot. Transient failures (compile error, regression, forge error) are
+    // Whether the result may enter the process-local L1 cache: a real optimization or a
+    // clean one-shot. Transient failures (compile error, regression, forge error) are
     // NOT cached, so an identical request can be retried.
     let cacheable: bool;
+    // Whether forge PROVED this rewrite equivalent on every target function. Gates the
+    // durable L2 store, which outlives the process and is shared by every deployment —
+    // an unverified result written there would be served forever, including by a later
+    // deployment that does have forge. L1 dies with the process (and `forge_available`
+    // cannot change within one), so it may hold unverified one-shots.
+    let mut verified = false;
     // Gas figures captured for the run log (set only when forge measured them).
     let mut run_gas_original: Option<u64> = None;
     let mut run_gas_optimized: Option<u64> = None;
@@ -642,6 +648,7 @@ pub(crate) async fn optimize_contract(
                 // caching it would freeze an unproven result into the durable L2 store and
                 // serve it forever without ever retrying verification.
                 cacheable = unverified.is_empty();
+                verified = cacheable;
             },
             // Equivalent but no construction-gas win → keep original.
             Ok(er) if er.compiles && er.all_passed => {
@@ -702,6 +709,8 @@ pub(crate) async fn optimize_contract(
             },
         }
     } else {
+        // No forge, so nothing was proven. Good enough for L1 (same process, same
+        // forge-less config, deterministic answer), never for the durable L2.
         analysis = "Optimized one-shot — forge unavailable, not verified.".to_string();
         cacheable = true;
     }
@@ -710,7 +719,7 @@ pub(crate) async fn optimize_contract(
     info!("=== OPTIMIZE COMPLETE ===");
     info!("  mode     : {}", mode);
     info!("  patterns : {}", suggested_patterns.len());
-    info!("  cached   : {}", cacheable);
+    info!("  cached   : L1={} L2={}", cacheable, verified);
     info!(
         "  timing   : parse {:.2?} | route+agents {:.2?} | final-verify {:.2?}",
         t_parse - t0,
@@ -749,16 +758,17 @@ pub(crate) async fn optimize_contract(
 
     if cacheable {
         // L1: in-memory, bounded so a flood of distinct inputs can't grow it.
-        {
-            let mut cache = state.cache.lock().unwrap();
-            if cache.len() < 1024 {
-                cache.insert(cache_key.clone(), response.clone());
-            }
+        let mut cache = state.cache.lock().unwrap();
+        if cache.len() < 1024 {
+            cache.insert(cache_key.clone(), response.clone());
         }
-        // L2: Turso (durable). Best-effort — a write failure doesn't fail the request.
-        if let Err(e) = db_cache_put(&state.db, &cache_key, &response).await {
-            warn!("cache: L2 turso write failed: {e}");
-        }
+    }
+    // L2: Turso (durable, shared). Verified results only. Best-effort — a write failure
+    // doesn't fail the request.
+    if verified
+        && let Err(e) = db_cache_put(&state.db, &cache_key, &response).await
+    {
+        warn!("cache: L2 turso write failed: {e}");
     }
 
     Ok(Json(response))

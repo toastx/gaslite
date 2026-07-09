@@ -2,6 +2,7 @@
 //! sandbox and measures construction gas via a Mantle fork.
 
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     path::Path,
@@ -9,10 +10,12 @@ use std::{
     sync::OnceLock,
     time::{Duration, Instant},
 };
+
+use axum::Json;
+use serde::{Deserialize, Serialize};
 use solang_parser::pt::{
-    CodeLocation, ContractPart, FunctionTy, Loc, SourceUnitPart, StructDefinition,
+    CodeLocation, ContractPart, ContractTy, FunctionTy, Loc, SourceUnitPart, StructDefinition,
 };
-use std::collections::{HashMap, HashSet};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -168,7 +171,56 @@ fn forge_binary() -> String {
     "forge".to_string()
 }
 
+/// The contract the sandbox should instantiate and measure.
+///
+/// Interfaces, libraries and `abstract contract`s are never instantiable, so they
+/// are excluded outright. Among the concrete contracts, one that another contract
+/// inherits from is a base class, not the subject — so those are excluded too, which
+/// leaves the *most-derived* contract. When several survive (independent helpers, no
+/// inheritance) the last one wins: Solidity convention is dependencies first, subject
+/// last. Falls back to a text scan when the source does not parse (LLM output can be
+/// mangled).
 pub(crate) fn extract_sol_contract_name(source: &str) -> Option<String> {
+    let Ok((su, _)) = solang_parser::parse(source, 0) else {
+        return scan_first_contract_name(source);
+    };
+
+    let contracts: Vec<&str> = su
+        .0
+        .iter()
+        .filter_map(|part| match part {
+            SourceUnitPart::ContractDefinition(def)
+                if matches!(def.ty, ContractTy::Contract(_)) =>
+            {
+                def.name.as_ref().map(|n| n.name.as_str())
+            },
+            _ => None,
+        })
+        .collect();
+
+    // Every name used as a base by some contract, at any inheritance depth.
+    let bases: HashSet<&str> = su
+        .0
+        .iter()
+        .filter_map(|part| match part {
+            SourceUnitPart::ContractDefinition(def) => Some(&def.base),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|b| b.name.identifiers.last().map(|id| id.name.as_str()))
+        .collect();
+
+    contracts
+        .iter()
+        .rev()
+        .find(|c| !bases.contains(*c))
+        .or_else(|| contracts.last())
+        .map(|c| (*c).to_string())
+        .or_else(|| scan_first_contract_name(source))
+}
+
+/// Text fallback for sources that do not parse.
+fn scan_first_contract_name(source: &str) -> Option<String> {
     for line in source.lines() {
         if let Some(rest) = line.trim().strip_prefix("contract ")
             && let Some(name) = rest
@@ -180,6 +232,29 @@ pub(crate) fn extract_sol_contract_name(source: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Rename a contract *declaration* by splicing over its name identifier, located via
+/// the AST. A plain `source.replace("contract Foo", …)` is not safe here: it also
+/// matches the prefix of `contract FooHelper`, and it can hit the phrase inside a
+/// comment. Falls back to that replacement only when the source does not parse.
+fn rename_contract(source: &str, from: &str, to: &str) -> String {
+    if let Ok((su, _)) = solang_parser::parse(source, 0) {
+        for part in &su.0 {
+            if let SourceUnitPart::ContractDefinition(def) = part
+                && let Some(name) = &def.name
+                && name.name == from
+                && let Loc::File(_, s, e) = name.loc
+            {
+                let mut out = String::with_capacity(source.len() + to.len());
+                out.push_str(&source[..s]);
+                out.push_str(to);
+                out.push_str(&source[e..]);
+                return out;
+            }
+        }
+    }
+    source.replacen(&format!("contract {from}"), &format!("contract {to}"), 1)
 }
 
 fn build_gas_test(orig_name: &str, opt_name: &str, ctor_args: &str) -> String {
@@ -389,7 +464,11 @@ fn array_element_literal(
     depth: usize,
 ) -> String {
     let inner = inner.trim();
-    if inner.starts_with("uint") || inner.starts_with("int") {
+    // Guard on `[`: `uint256[2]` also starts with "uint", and `uint256[2](0)` is not
+    // a cast — a nested array element must recurse into its own array literal.
+    let is_plain_numeric =
+        !inner.contains('[') && (inner.starts_with("uint") || inner.starts_with("int"));
+    if is_plain_numeric {
         format!("{inner}(0)")
     } else {
         default_literal_for_type(inner, types, depth)
@@ -468,8 +547,23 @@ fn default_literal_for_type(
     "0".to_string()
 }
 
-// Strip markdown artifacts that DeepSeek sometimes embeds in optimized output:
-// ``` fence markers, **bold** lines, *(italic notes)*, and bullet-point explanations.
+/// Drop ``` fence markers only. A fence line is never valid Solidity, so this is
+/// safe to run over any source, including code the user wrote.
+fn strip_fence_lines(code: &str) -> String {
+    code.lines()
+        .filter(|line| !line.trim().starts_with("```"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// [`strip_fence_lines`] plus the prose heuristics needed for LLM output: `**bold**`
+/// lines, `*(italic notes)*`, and bullet-point explanations.
+///
+/// Only ever apply this to model-generated code. The heuristics are not sound over
+/// Solidity — a wrapped expression can legitimately begin a line with `**` (the
+/// exponent operator) or `- ` (subtraction), and deleting that line silently changes
+/// the contract's meaning. The original contract is the behavioural oracle, so it is
+/// written to the sandbox with fences stripped and nothing else touched.
 fn clean_for_forge(code: &str) -> String {
     code.lines()
         .filter(|line| {
@@ -550,19 +644,20 @@ fn write_sandbox_project(
 
     let orig_name =
         extract_sol_contract_name(original).unwrap_or_else(|| "OriginalContract".to_string());
-    let opt_src_name = extract_sol_contract_name(optimized).unwrap_or_else(|| orig_name.clone());
+
+    // Strip the model's markdown BEFORE renaming, so `rename_contract` sees source
+    // that parses and can splice the name identifier precisely.
+    let opt_clean = clean_for_forge(optimized);
+    let opt_src_name = extract_sol_contract_name(&opt_clean).unwrap_or_else(|| orig_name.clone());
     // Rename optimized contract to avoid symbol collision with original.
     let opt_name = format!("{orig_name}Optimized");
-    let opt_code = optimized.replacen(
-        &format!("contract {opt_src_name}"),
-        &format!("contract {opt_name}"),
-        1,
-    );
+    let opt_code = rename_contract(&opt_clean, &opt_src_name, &opt_name);
 
-    fs::write(root.join("src/Original.sol"), clean_for_forge(original))
+    // The original is user-supplied Solidity and the behavioural oracle — never run
+    // the prose heuristics over it (see `clean_for_forge`).
+    fs::write(root.join("src/Original.sol"), strip_fence_lines(original))
         .map_err(|e| e.to_string())?;
-    fs::write(root.join("src/Optimized.sol"), clean_for_forge(&opt_code))
-        .map_err(|e| e.to_string())?;
+    fs::write(root.join("src/Optimized.sol"), opt_code).map_err(|e| e.to_string())?;
 
     let mantle_rpc =
         std::env::var("MANTLE_RPC_URL").unwrap_or_else(|_| "https://rpc.mantle.xyz".to_string());
@@ -1166,6 +1261,108 @@ mod tests {
             synthesize_constructor_args(src),
             "S(E(0), 0)"
         );
+    }
+
+    #[test]
+    fn ctor_args_nested_fixed_array_recurses_instead_of_casting() {
+        // `uint256[2]` starts with "uint", but `uint256[2](0)` is not a cast.
+        let src = "contract C { constructor(uint256[2][2] memory xs) {} }";
+        assert_eq!(
+            synthesize_constructor_args(src),
+            "[[uint256(0), uint256(0)], [uint256(0), uint256(0)]]"
+        );
+    }
+
+    // ── contract selection (C3): the sandbox must instantiate the SUBJECT ──────────
+    #[test]
+    fn contract_name_skips_helpers_and_takes_the_subject() {
+        let src = "contract Helper { function h() public {} }\n\
+                   contract Main { function m() public {} }";
+        assert_eq!(extract_sol_contract_name(src).as_deref(), Some("Main"));
+    }
+
+    #[test]
+    fn contract_name_skips_interfaces_libraries_and_abstract() {
+        let src = "interface IThing { function t() external; }\n\
+                   library L { function l() internal pure {} }\n\
+                   abstract contract Base { function b() public virtual; }\n\
+                   contract Impl is Base { function b() public override {} }";
+        assert_eq!(extract_sol_contract_name(src).as_deref(), Some("Impl"));
+    }
+
+    #[test]
+    fn contract_name_prefers_most_derived_even_when_base_declared_last() {
+        // "last concrete contract" alone would wrongly pick ERC20 here.
+        let src = "contract Token is ERC20 { function t() public {} }\n\
+                   contract ERC20 { function e() public {} }";
+        assert_eq!(extract_sol_contract_name(src).as_deref(), Some("Token"));
+    }
+
+    #[test]
+    fn contract_name_falls_back_to_text_scan_when_source_does_not_parse() {
+        let src = "contract Broken { function f( <<<not solidity>>> }";
+        assert_eq!(extract_sol_contract_name(src).as_deref(), Some("Broken"));
+    }
+
+    // ── renaming (C3): must not match a prefix of a longer contract name ───────────
+    #[test]
+    fn rename_contract_does_not_hit_a_longer_prefixed_name() {
+        let src = "contract MainHelper { function h() public {} }\n\
+                   contract Main { function m() public {} }";
+        let out = rename_contract(src, "Main", "MainOptimized");
+        assert!(
+            out.contains("contract MainHelper {"),
+            "helper was renamed: {out}"
+        );
+        assert!(
+            out.contains("contract MainOptimized {"),
+            "subject not renamed: {out}"
+        );
+    }
+
+    // ── cleaning (C3): prose heuristics must not touch user Solidity ───────────────
+    #[test]
+    fn strip_fence_lines_preserves_solidity_that_looks_like_prose() {
+        // `**` is exponentiation and `- ` is subtraction on a wrapped line.
+        let src = "contract C {\n  uint256 a = 2\n    ** 8;\n  uint256 b = x\n    - Y;\n}";
+        assert_eq!(strip_fence_lines(src), src);
+    }
+
+    #[test]
+    fn clean_for_forge_would_have_corrupted_that_same_source() {
+        // Documents exactly why the original is no longer run through this.
+        let src = "contract C {\n  uint256 a = 2\n    ** 8;\n  uint256 b = x\n    - Y;\n}";
+        assert_ne!(clean_for_forge(src), src);
+    }
+
+    #[test]
+    fn strip_fence_lines_still_drops_fences() {
+        assert_eq!(
+            strip_fence_lines("```solidity\ncontract C {}\n```"),
+            "contract C {}"
+        );
+    }
+
+    #[test]
+    fn clean_for_forge_drops_model_prose() {
+        let src = "**Optimized version:**\ncontract C {}\n- Uses custom errors\n*(note)*";
+        assert_eq!(clean_for_forge(src), "contract C {}");
+    }
+
+    // ── verification coverage (C1) ────────────────────────────────────────────────
+    #[test]
+    fn unverified_unions_broken_and_missing_tests() {
+        let er = EquivResult {
+            invalid: vec!["transfer".into()],
+            missing: vec!["approve".into(), "mint".into()],
+            ..Default::default()
+        };
+        assert_eq!(er.unverified(), vec!["approve", "mint", "transfer"]);
+    }
+
+    #[test]
+    fn unverified_is_empty_when_every_function_was_tested() {
+        assert!(EquivResult::default().unverified().is_empty());
     }
 
     #[test]

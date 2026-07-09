@@ -112,19 +112,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Migration failed");
 
-    // Durable result cache (survives restarts) — L2 behind the in-memory L1.
+    // Durable result cache (survives restarts) — L2 behind the in-memory L1. Only
+    // forge-verified results are stored here; `verified` exists so a row can never be
+    // trusted implicitly.
     state
         .db
         .execute(
             "CREATE TABLE IF NOT EXISTS optimize_cache (
                 cache_key  TEXT PRIMARY KEY,
                 response   TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                verified   INTEGER NOT NULL DEFAULT 0
             )",
             vec![],
         )
         .await
         .expect("optimize_cache migration failed");
+
+    // Backfill for databases created before `verified` existed. Those rows were written
+    // without any verification gate, so retiring them via `DEFAULT 0` is exactly right —
+    // reads filter on `verified = 1`. Errors here mean the column is already present.
+    if let Err(e) = state
+        .db
+        .execute(
+            "ALTER TABLE optimize_cache ADD COLUMN verified INTEGER NOT NULL DEFAULT 0",
+            vec![],
+        )
+        .await
+    {
+        tracing::debug!("optimize_cache.verified already present ({e})");
+    }
 
     api::admin::create_qdrant_indexes(&state)
         .await

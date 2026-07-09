@@ -47,10 +47,14 @@ pub(crate) struct AppState {
 }
 
 /// L2 cache read — fetch a stored optimization from Turso by normalized key.
+///
+/// Filters on `verified = 1`. The L2 store is durable and shared across restarts and
+/// deployments, so a row written by a deployment without forge (or by a build predating
+/// the `verified` column) must never be served as though it were proven.
 pub(crate) async fn db_cache_get(db: &Turso, key: &str) -> Option<OptimizeResponse> {
     let rows = db
         .query(
-            "SELECT response FROM optimize_cache WHERE cache_key = ?",
+            "SELECT response FROM optimize_cache WHERE cache_key = ? AND verified = 1",
             vec![TursoArg::Text(key.to_string())],
         )
         .await
@@ -59,7 +63,10 @@ pub(crate) async fn db_cache_get(db: &Turso, key: &str) -> Option<OptimizeRespon
     serde_json::from_str::<OptimizeResponse>(json).ok()
 }
 
-/// L2 cache write — persist an optimization to Turso (write-through).
+/// L2 cache write — persist a forge-verified optimization to Turso (write-through).
+///
+/// Call this ONLY for a rewrite that forge proved behaviourally equivalent on every
+/// target function; rows land with `verified = 1` and are served forever after.
 pub(crate) async fn db_cache_put(
     db: &Turso,
     key: &str,
@@ -71,7 +78,8 @@ pub(crate) async fn db_cache_put(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     db.execute(
-        "INSERT OR REPLACE INTO optimize_cache (cache_key, response, created_at) VALUES (?,?,?)",
+        "INSERT OR REPLACE INTO optimize_cache (cache_key, response, created_at, verified) \
+         VALUES (?,?,?,1)",
         vec![
             TursoArg::Text(key.to_string()),
             TursoArg::Text(json),
