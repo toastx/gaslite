@@ -24,10 +24,7 @@ pub fn strip_code_fences(s: &str) -> String {
         }
     }
     if found_fence && !result.is_empty() {
-        result
-            .join("\n")
-            .trim()
-            .to_string()
+        result.join("\n").trim().to_string()
     } else {
         s.to_string()
     }

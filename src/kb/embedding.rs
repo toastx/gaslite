@@ -3,9 +3,11 @@
 //! adopting rig-fastembed (which pins fastembed 4.x). Produces the same
 //! 384-dim BGE-Small-EN-v1.5 vectors as the ingested corpus.
 
-use crate::ai::Embedder;
-use rig_core::embeddings::embedding::{Embedding, EmbeddingError, EmbeddingModel};
 use std::sync::Arc;
+
+use rig_core::embeddings::embedding::{Embedding, EmbeddingError, EmbeddingModel};
+
+use super::ai::Embedder;
 
 const NDIMS: usize = 384;
 
@@ -21,17 +23,13 @@ impl FastembedAdapter {
 }
 
 impl EmbeddingModel for FastembedAdapter {
-    const MAX_DOCUMENTS: usize = 256;
-
     // We construct the adapter via `new()` (wrapping our own loaded model), never
     // through rig's client-based `make`, so there is no provider client type.
     type Client = ();
 
-    fn make(
-        _client: &Self::Client,
-        _model: impl Into<String>,
-        _dims: Option<usize>,
-    ) -> Self {
+    const MAX_DOCUMENTS: usize = 256;
+
+    fn make(_client: &Self::Client, _model: impl Into<String>, _dims: Option<usize>) -> Self {
         unimplemented!(
             "FastembedAdapter is built via FastembedAdapter::new(), not EmbeddingModel::make()"
         )
@@ -45,21 +43,13 @@ impl EmbeddingModel for FastembedAdapter {
         &self,
         texts: impl IntoIterator<Item = String> + Send,
     ) -> Result<Vec<Embedding>, EmbeddingError> {
-        let docs: Vec<String> = texts
-            .into_iter()
-            .collect();
-        let inner = self
-            .inner
-            .clone();
+        let docs: Vec<String> = texts.into_iter().collect();
+        let inner = self.inner.clone();
         let to_embed = docs.clone();
 
         let vecs = tokio::task::spawn_blocking(move || inner.embed_blocking(to_embed))
             .await
-            .map_err(|e| {
-                EmbeddingError::ProviderError(format!(
-                    "embed task panicked: {e}"
-                ))
-            })?
+            .map_err(|e| EmbeddingError::ProviderError(format!("embed task panicked: {e}")))?
             .map_err(EmbeddingError::ProviderError)?;
 
         Ok(docs
@@ -67,10 +57,7 @@ impl EmbeddingModel for FastembedAdapter {
             .zip(vecs)
             .map(|(document, v)| Embedding {
                 document,
-                vec: v
-                    .into_iter()
-                    .map(|f| f as f64)
-                    .collect(),
+                vec: v.into_iter().map(|f| f as f64).collect(),
             })
             .collect())
     }

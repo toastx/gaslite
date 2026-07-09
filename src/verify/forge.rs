@@ -1,9 +1,8 @@
 //! Forge verification: compiles original vs. optimized contracts in a temp
 //! sandbox and measures construction gas via a Mantle fork.
 
-use axum::Json;
-use serde::{Deserialize, Serialize};
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     path::Path,
@@ -11,10 +10,12 @@ use std::{
     sync::OnceLock,
     time::{Duration, Instant},
 };
+
+use axum::Json;
+use serde::{Deserialize, Serialize};
 use solang_parser::pt::{
-    CodeLocation, ContractPart, FunctionTy, Loc, SourceUnitPart, StructDefinition,
+    CodeLocation, ContractPart, ContractTy, FunctionTy, Loc, SourceUnitPart, StructDefinition,
 };
-use std::collections::{HashMap, HashSet};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -49,29 +50,17 @@ pub struct FunctionGas {
 
 // ── handler ───────────────────────────────────────────────────────────────────
 pub async fn verify_contract(
-    Json(payload): Json<VerifyRequest>
+    Json(payload): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, (axum::http::StatusCode, String)> {
     info!(
         "POST /api/verify — {} + {} bytes",
-        payload
-            .original_code
-            .len(),
-        payload
-            .optimized_code
-            .len()
+        payload.original_code.len(),
+        payload.optimized_code.len()
     );
-    run_forge_sandbox_async(
-        payload.original_code,
-        payload.optimized_code,
-    )
-    .await
-    .map(Json)
-    .map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            e,
-        )
-    })
+    run_forge_sandbox_async(payload.original_code, payload.optimized_code)
+        .await
+        .map(Json)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 // ── concurrency-bounded async entrypoint ──────────────────────────────────────
@@ -83,10 +72,7 @@ fn forge_semaphore() -> &'static Semaphore {
     SEM.get_or_init(|| {
         let permits = std::env::var("FORGE_MAX_CONCURRENCY")
             .ok()
-            .and_then(|v| {
-                v.parse::<usize>()
-                    .ok()
-            })
+            .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(2)
             .max(1);
         Semaphore::new(permits)
@@ -112,23 +98,11 @@ pub(crate) async fn run_forge_sandbox_async(
 // ── helpers ───────────────────────────────────────────────────────────────────
 /// Run a command with a wall-clock timeout, killing it on expiry. Stdout/stderr
 /// are drained on threads so a chatty child can't deadlock on a full pipe buffer.
-fn run_with_timeout(
-    mut cmd: Command,
-    timeout: Duration,
-) -> std::io::Result<Output> {
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<Output> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
-    let mut out_pipe = child
-        .stdout
-        .take()
-        .expect("piped stdout");
-    let mut err_pipe = child
-        .stderr
-        .take()
-        .expect("piped stderr");
+    let mut out_pipe = child.stdout.take().expect("piped stdout");
+    let mut err_pipe = child.stderr.take().expect("piped stderr");
     let out_h = std::thread::spawn(move || {
         let mut b = Vec::new();
         let _ = out_pipe.read_to_end(&mut b);
@@ -156,10 +130,7 @@ fn run_with_timeout(
             let _ = err_h.join();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!(
-                    "forge subprocess timed out after {}s",
-                    timeout.as_secs()
-                ),
+                format!("forge subprocess timed out after {}s", timeout.as_secs()),
             ));
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -167,26 +138,16 @@ fn run_with_timeout(
 
     Ok(Output {
         status,
-        stdout: out_h
-            .join()
-            .unwrap_or_default(),
-        stderr: err_h
-            .join()
-            .unwrap_or_default(),
+        stdout: out_h.join().unwrap_or_default(),
+        stderr: err_h.join().unwrap_or_default(),
     })
 }
 
 /// Timeout (seconds) for a forge step. `build` is local; `test` hits a Mantle fork.
-fn forge_timeout(
-    var: &str,
-    default_secs: u64,
-) -> Duration {
+fn forge_timeout(var: &str, default_secs: u64) -> Duration {
     let secs = std::env::var(var)
         .ok()
-        .and_then(|v| {
-            v.parse::<u64>()
-                .ok()
-        })
+        .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(default_secs);
     Duration::from_secs(secs)
 }
@@ -196,10 +157,7 @@ pub(crate) fn forge_available() -> bool {
     std::process::Command::new(forge_binary())
         .arg("--version")
         .output()
-        .map(|o| {
-            o.status
-                .success()
-        })
+        .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
@@ -213,11 +171,58 @@ fn forge_binary() -> String {
     "forge".to_string()
 }
 
+/// The contract the sandbox should instantiate and measure.
+///
+/// Interfaces, libraries and `abstract contract`s are never instantiable, so they
+/// are excluded outright. Among the concrete contracts, one that another contract
+/// inherits from is a base class, not the subject — so those are excluded too, which
+/// leaves the *most-derived* contract. When several survive (independent helpers, no
+/// inheritance) the last one wins: Solidity convention is dependencies first, subject
+/// last. Falls back to a text scan when the source does not parse (LLM output can be
+/// mangled).
 pub(crate) fn extract_sol_contract_name(source: &str) -> Option<String> {
+    let Ok((su, _)) = solang_parser::parse(source, 0) else {
+        return scan_first_contract_name(source);
+    };
+
+    let contracts: Vec<&str> = su
+        .0
+        .iter()
+        .filter_map(|part| match part {
+            SourceUnitPart::ContractDefinition(def)
+                if matches!(def.ty, ContractTy::Contract(_)) =>
+            {
+                def.name.as_ref().map(|n| n.name.as_str())
+            },
+            _ => None,
+        })
+        .collect();
+
+    // Every name used as a base by some contract, at any inheritance depth.
+    let bases: HashSet<&str> = su
+        .0
+        .iter()
+        .filter_map(|part| match part {
+            SourceUnitPart::ContractDefinition(def) => Some(&def.base),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|b| b.name.identifiers.last().map(|id| id.name.as_str()))
+        .collect();
+
+    contracts
+        .iter()
+        .rev()
+        .find(|c| !bases.contains(*c))
+        .or_else(|| contracts.last())
+        .map(|c| (*c).to_string())
+        .or_else(|| scan_first_contract_name(source))
+}
+
+/// Text fallback for sources that do not parse.
+fn scan_first_contract_name(source: &str) -> Option<String> {
     for line in source.lines() {
-        if let Some(rest) = line
-            .trim()
-            .strip_prefix("contract ")
+        if let Some(rest) = line.trim().strip_prefix("contract ")
             && let Some(name) = rest
                 .split(|c: char| !c.is_alphanumeric() && c != '_')
                 .next()
@@ -229,11 +234,30 @@ pub(crate) fn extract_sol_contract_name(source: &str) -> Option<String> {
     None
 }
 
-fn build_gas_test(
-    orig_name: &str,
-    opt_name: &str,
-    ctor_args: &str,
-) -> String {
+/// Rename a contract *declaration* by splicing over its name identifier, located via
+/// the AST. A plain `source.replace("contract Foo", …)` is not safe here: it also
+/// matches the prefix of `contract FooHelper`, and it can hit the phrase inside a
+/// comment. Falls back to that replacement only when the source does not parse.
+fn rename_contract(source: &str, from: &str, to: &str) -> String {
+    if let Ok((su, _)) = solang_parser::parse(source, 0) {
+        for part in &su.0 {
+            if let SourceUnitPart::ContractDefinition(def) = part
+                && let Some(name) = &def.name
+                && name.name == from
+                && let Loc::File(_, s, e) = name.loc
+            {
+                let mut out = String::with_capacity(source.len() + to.len());
+                out.push_str(&source[..s]);
+                out.push_str(to);
+                out.push_str(&source[e..]);
+                return out;
+            }
+        }
+    }
+    source.replacen(&format!("contract {from}"), &format!("contract {to}"), 1)
+}
+
+fn build_gas_test(orig_name: &str, opt_name: &str, ctor_args: &str) -> String {
     format!(
         "// SPDX-License-Identifier: MIT\n\
          pragma solidity ^0.8.0;\n\
@@ -440,7 +464,11 @@ fn array_element_literal(
     depth: usize,
 ) -> String {
     let inner = inner.trim();
-    if inner.starts_with("uint") || inner.starts_with("int") {
+    // Guard on `[`: `uint256[2]` also starts with "uint", and `uint256[2](0)` is not
+    // a cast — a nested array element must recurse into its own array literal.
+    let is_plain_numeric =
+        !inner.contains('[') && (inner.starts_with("uint") || inner.starts_with("int"));
+    if is_plain_numeric {
         format!("{inner}(0)")
     } else {
         default_literal_for_type(inner, types, depth)
@@ -478,15 +506,14 @@ fn default_literal_for_type(
         "address" => return "address(0)".to_string(),
         "bool" => return "false".to_string(),
         "string" | "bytes" => return "\"\"".to_string(),
-        _ => {}
+        _ => {},
     }
     if t.starts_with("uint") || t.starts_with("int") {
         return "0".to_string();
     }
     // Fixed-size bytesN.
     if let Some(n) = t.strip_prefix("bytes")
-        && n.parse::<u32>()
-            .is_ok()
+        && n.parse::<u32>().is_ok()
     {
         return format!("{t}(0)");
     }
@@ -520,8 +547,23 @@ fn default_literal_for_type(
     "0".to_string()
 }
 
-// Strip markdown artifacts that DeepSeek sometimes embeds in optimized output:
-// ``` fence markers, **bold** lines, *(italic notes)*, and bullet-point explanations.
+/// Drop ``` fence markers only. A fence line is never valid Solidity, so this is
+/// safe to run over any source, including code the user wrote.
+fn strip_fence_lines(code: &str) -> String {
+    code.lines()
+        .filter(|line| !line.trim().starts_with("```"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// [`strip_fence_lines`] plus the prose heuristics needed for LLM output: `**bold**`
+/// lines, `*(italic notes)*`, and bullet-point explanations.
+///
+/// Only ever apply this to model-generated code. The heuristics are not sound over
+/// Solidity — a wrapped expression can legitimately begin a line with `**` (the
+/// exponent operator) or `- ` (subtraction), and deleting that line silently changes
+/// the contract's meaning. The original contract is the behavioural oracle, so it is
+/// written to the sandbox with fences stripped and nothing else touched.
 fn clean_for_forge(code: &str) -> String {
     code.lines()
         .filter(|line| {
@@ -559,30 +601,19 @@ fn collect_forge_errors(stderr: &str) -> Vec<String> {
             let lo = l.to_lowercase();
             lo.contains("error") || lo.contains("undeclared") || lo.contains("not found")
         })
-        .map(|l| {
-            l.trim()
-                .to_string()
-        })
+        .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .take(20)
         .collect()
 }
 
-fn parse_test_gas(
-    output: &str,
-    fn_suffix: &str,
-) -> Option<u64> {
+fn parse_test_gas(output: &str, fn_suffix: &str) -> Option<u64> {
     for line in output.lines() {
         if line.contains(fn_suffix)
             && line.contains("gas:")
-            && let Some(g) = line
-                .split("gas:")
-                .nth(1)
+            && let Some(g) = line.split("gas:").nth(1)
         {
-            let s = g
-                .trim()
-                .trim_end_matches(')')
-                .trim();
+            let s = g.trim().trim_end_matches(')').trim();
             if let Ok(n) = s.parse::<u64>() {
                 return Some(n);
             }
@@ -591,18 +622,10 @@ fn parse_test_gas(
     None
 }
 
-pub(crate) fn run_forge_sandbox(
-    original: &str,
-    optimized: &str,
-) -> Result<VerifyResponse, String> {
+pub(crate) fn run_forge_sandbox(original: &str, optimized: &str) -> Result<VerifyResponse, String> {
     let forge = forge_binary();
-    let root = std::env::temp_dir().join(format!(
-        "gaslite_{}",
-        Uuid::new_v4()
-    ));
-    let res = forge_sandbox_inner(
-        &forge, &root, original, optimized,
-    );
+    let root = std::env::temp_dir().join(format!("gaslite_{}", Uuid::new_v4()));
+    let res = forge_sandbox_inner(&forge, &root, original, optimized);
     let _ = fs::remove_dir_all(&root);
     res
 }
@@ -621,25 +644,20 @@ fn write_sandbox_project(
 
     let orig_name =
         extract_sol_contract_name(original).unwrap_or_else(|| "OriginalContract".to_string());
-    let opt_src_name = extract_sol_contract_name(optimized).unwrap_or_else(|| orig_name.clone());
+
+    // Strip the model's markdown BEFORE renaming, so `rename_contract` sees source
+    // that parses and can splice the name identifier precisely.
+    let opt_clean = clean_for_forge(optimized);
+    let opt_src_name = extract_sol_contract_name(&opt_clean).unwrap_or_else(|| orig_name.clone());
     // Rename optimized contract to avoid symbol collision with original.
     let opt_name = format!("{orig_name}Optimized");
-    let opt_code = optimized.replacen(
-        &format!("contract {opt_src_name}"),
-        &format!("contract {opt_name}"),
-        1,
-    );
+    let opt_code = rename_contract(&opt_clean, &opt_src_name, &opt_name);
 
-    fs::write(
-        root.join("src/Original.sol"),
-        clean_for_forge(original),
-    )
-    .map_err(|e| e.to_string())?;
-    fs::write(
-        root.join("src/Optimized.sol"),
-        clean_for_forge(&opt_code),
-    )
-    .map_err(|e| e.to_string())?;
+    // The original is user-supplied Solidity and the behavioural oracle — never run
+    // the prose heuristics over it (see `clean_for_forge`).
+    fs::write(root.join("src/Original.sol"), strip_fence_lines(original))
+        .map_err(|e| e.to_string())?;
+    fs::write(root.join("src/Optimized.sol"), opt_code).map_err(|e| e.to_string())?;
 
     let mantle_rpc =
         std::env::var("MANTLE_RPC_URL").unwrap_or_else(|_| "https://rpc.mantle.xyz".to_string());
@@ -648,10 +666,7 @@ fn write_sandbox_project(
     // Mantle-fork suite stays bounded. Override with FORGE_FUZZ_RUNS.
     let fuzz_runs = std::env::var("FORGE_FUZZ_RUNS")
         .ok()
-        .and_then(|v| {
-            v.parse::<u32>()
-                .ok()
-        })
+        .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(64)
         .max(1);
     fs::write(
@@ -676,27 +691,13 @@ fn forge_sandbox_inner(
     let (orig_name, opt_name, mantle_rpc) = write_sandbox_project(root, original, optimized)?;
 
     // ── build ─────────────────────────────────────────────────────────────────
-    info!(
-        "  forge build: {}",
-        root.display()
-    );
+    info!("  forge build: {}", root.display());
     let mut build_cmd = Command::new(forge);
-    build_cmd.args([
-        "build",
-        "--root",
-        root.to_str()
-            .unwrap(),
-    ]);
-    let build = run_with_timeout(
-        build_cmd,
-        forge_timeout("FORGE_BUILD_TIMEOUT_SECS", 90),
-    )
-    .map_err(|e| format!("forge build failed (not installed or timed out): {e}"))?;
+    build_cmd.args(["build", "--root", root.to_str().unwrap()]);
+    let build = run_with_timeout(build_cmd, forge_timeout("FORGE_BUILD_TIMEOUT_SECS", 90))
+        .map_err(|e| format!("forge build failed (not installed or timed out): {e}"))?;
 
-    if !build
-        .status
-        .success()
-    {
+    if !build.status.success() {
         let stderr = String::from_utf8_lossy(&build.stderr).to_string();
         let stdout = String::from_utf8_lossy(&build.stdout).to_string();
         info!("  forge build: FAILED");
@@ -719,25 +720,18 @@ fn forge_sandbox_inner(
     )
     .map_err(|e| e.to_string())?;
 
-    info!(
-        "  forge test: fork={}",
-        mantle_rpc
-    );
+    info!("  forge test: fork={}", mantle_rpc);
     let mut test_cmd = Command::new(forge);
     test_cmd.args([
         "test",
         "--root",
-        root.to_str()
-            .unwrap(),
+        root.to_str().unwrap(),
         "--fork-url",
         &mantle_rpc,
         "-vv",
     ]);
-    let test_run = run_with_timeout(
-        test_cmd,
-        forge_timeout("FORGE_TEST_TIMEOUT_SECS", 240),
-    )
-    .map_err(|e| format!("forge test failed or timed out: {e}"))?;
+    let test_run = run_with_timeout(test_cmd, forge_timeout("FORGE_TEST_TIMEOUT_SECS", 240))
+        .map_err(|e| format!("forge test failed or timed out: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&test_run.stdout).to_string();
     let stderr = String::from_utf8_lossy(&test_run.stderr).to_string();
@@ -773,12 +767,18 @@ fn forge_sandbox_inner(
 /// fails the sanity suite is a broken test (bad preconditions, wrong arithmetic),
 /// not a finding — it is reported in `invalid` and excluded from gating, so a
 /// buggy generated test can never falsely reject a good optimization.
+///
+/// A function is only PROVEN equivalent when it has a test that passed both
+/// suites. `invalid` (broken test) and `missing` (no test at all) are both
+/// *absence of proof*, not proof of correctness — [`EquivResult::unverified`]
+/// unions them, and the caller must surface that set rather than silently
+/// counting only the tests that happened to exist.
 #[derive(Debug, Default)]
 pub struct EquivResult {
     pub compiles: bool,
     pub errors: Vec<String>,
     /// True only when it compiled, at least one valid test ran, and every valid
-    /// test passed.
+    /// test passed. Says NOTHING about coverage — check `unverified()` too.
     pub all_passed: bool,
     /// Function names with a GENUINE behavioural divergence (sanity passed,
     /// equivalence failed).
@@ -789,6 +789,11 @@ pub struct EquivResult {
     /// For each broken test, the sanity-suite `[FAIL...]` line (revert reason) —
     /// fed back to the verify agent when regenerating the test.
     pub invalid_reasons: std::collections::HashMap<String, String>,
+    /// Target functions for which no equivalence test was ever generated (the
+    /// verify agent errored or returned an empty body). Filled in by the caller:
+    /// `equivalence_inner` only ever sees the tests that DO exist, so it cannot
+    /// know what is absent.
+    pub missing: Vec<String>,
     /// Number of tests that were valid (passed sanity) and therefore counted.
     pub valid_count: usize,
     pub gas_original: Option<u64>,
@@ -799,12 +804,25 @@ pub struct EquivResult {
     pub forge_output: String,
 }
 
+impl EquivResult {
+    /// Target functions with no valid passing equivalence test — broken tests
+    /// (`invalid`) plus never-generated ones (`missing`). Both mean "we did not
+    /// prove this function equivalent"; the two sets are disjoint by construction.
+    pub fn unverified(&self) -> Vec<String> {
+        let mut out = self.invalid.clone();
+        out.extend(self.missing.iter().cloned());
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
 /// Assemble the differential test file. Two suites share the same generated
 /// `test_eq_*` bodies (they reference only the `o`/`p` instance variables):
-/// - `EquivalenceTest`: `o` = original, `p` = optimized — the real comparison,
-///   plus the `test_gas_*` construction-gas pair.
-/// - `SanityTest`: `o` and `p` are BOTH the original — a test that fails here is
-///   broken by construction and must not gate the optimization.
+/// - `EquivalenceTest`: `o` = original, `p` = optimized — the real comparison, plus the
+///   `test_gas_*` construction-gas pair.
+/// - `SanityTest`: `o` and `p` are BOTH the original — a test that fails here is broken by
+///   construction and must not gate the optimization.
 fn build_equivalence_test(
     orig_name: &str,
     opt_name: &str,
@@ -857,10 +875,7 @@ fn run_equivalence(
     test_fns: &[(String, String)],
 ) -> Result<EquivResult, String> {
     let forge = forge_binary();
-    let root = std::env::temp_dir().join(format!(
-        "gaslite_eq_{}",
-        Uuid::new_v4()
-    ));
+    let root = std::env::temp_dir().join(format!("gaslite_eq_{}", Uuid::new_v4()));
     let res = equivalence_inner(&forge, &root, original, optimized, test_fns);
     let _ = fs::remove_dir_all(&root);
     res
@@ -875,25 +890,13 @@ fn equivalence_inner(
 ) -> Result<EquivResult, String> {
     let (orig_name, opt_name, mantle_rpc) = write_sandbox_project(root, original, optimized)?;
 
-    // 1. Build the contracts ALONE first, so a compile failure here is
-    //    unambiguously the optimized contract's fault (accurate rejection), not
-    //    the generated tests'.
+    // 1. Build the contracts ALONE first, so a compile failure here is unambiguously the optimized
+    //    contract's fault (accurate rejection), not the generated tests'.
     let mut build_cmd = Command::new(forge);
-    build_cmd.args([
-        "build",
-        "--root",
-        root.to_str()
-            .unwrap(),
-    ]);
-    let build = run_with_timeout(
-        build_cmd,
-        forge_timeout("FORGE_BUILD_TIMEOUT_SECS", 90),
-    )
-    .map_err(|e| format!("forge build failed (not installed or timed out): {e}"))?;
-    if !build
-        .status
-        .success()
-    {
+    build_cmd.args(["build", "--root", root.to_str().unwrap()]);
+    let build = run_with_timeout(build_cmd, forge_timeout("FORGE_BUILD_TIMEOUT_SECS", 90))
+        .map_err(|e| format!("forge build failed (not installed or timed out): {e}"))?;
+    if !build.status.success() {
         let combined = format!(
             "{}{}",
             String::from_utf8_lossy(&build.stdout),
@@ -908,13 +911,9 @@ fn equivalence_inner(
         });
     }
 
-    // 2. Now add the generated tests. A compile failure from here on is the
-    //    TESTS' fault → Err, so the caller reports "could not verify" instead of
-    //    wrongly blaming the contract.
-    let bodies: Vec<String> = test_fns
-        .iter()
-        .map(|(_, body)| body.clone())
-        .collect();
+    // 2. Now add the generated tests. A compile failure from here on is the TESTS' fault → Err, so
+    //    the caller reports "could not verify" instead of wrongly blaming the contract.
+    let bodies: Vec<String> = test_fns.iter().map(|(_, body)| body.clone()).collect();
     let ctor_args = synthesize_constructor_args(original);
     fs::write(
         root.join("test/Equivalence.t.sol"),
@@ -931,8 +930,7 @@ fn equivalence_inner(
     test_cmd.args([
         "test",
         "--root",
-        root.to_str()
-            .unwrap(),
+        root.to_str().unwrap(),
         "--fork-url",
         &mantle_rpc,
         // --gas-report adds a per-function gas table for BOTH contracts. Each
@@ -941,11 +939,8 @@ fn equivalence_inner(
         "--gas-report",
         "-vv",
     ]);
-    let test_run = run_with_timeout(
-        test_cmd,
-        forge_timeout("FORGE_TEST_TIMEOUT_SECS", 240),
-    )
-    .map_err(|e| format!("forge test failed or timed out: {e}"))?;
+    let test_run = run_with_timeout(test_cmd, forge_timeout("FORGE_TEST_TIMEOUT_SECS", 240))
+        .map_err(|e| format!("forge test failed or timed out: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&test_run.stdout).to_string();
     let stderr = String::from_utf8_lossy(&test_run.stderr).to_string();
@@ -968,12 +963,8 @@ fn equivalence_inner(
     //    - passes both                                     → equivalent
     let suites = suite_result_lines(&stdout);
     let empty: Vec<String> = Vec::new();
-    let eq_lines = suites
-        .get("EquivalenceTest")
-        .unwrap_or(&empty);
-    let sanity_lines = suites
-        .get("SanityTest")
-        .unwrap_or(&empty);
+    let eq_lines = suites.get("EquivalenceTest").unwrap_or(&empty);
+    let sanity_lines = suites.get("SanityTest").unwrap_or(&empty);
 
     let mut failed: Vec<String> = Vec::new();
     let mut invalid: Vec<String> = Vec::new();
@@ -1030,6 +1021,8 @@ fn equivalence_inner(
         failed,
         invalid,
         invalid_reasons,
+        // Only the caller knows the full target list; it fills this in.
+        missing: Vec::new(),
         valid_count,
         gas_original,
         gas_optimized,
@@ -1046,10 +1039,7 @@ fn gas_report_cells(line: &str) -> Vec<String> {
     line.replace('┆', "|")
         .replace('│', "|")
         .split('|')
-        .map(|c| {
-            c.trim()
-                .to_string()
-        })
+        .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty())
         .collect()
 }
@@ -1097,16 +1087,9 @@ fn parse_gas_report(
         if cells.len() >= 6 && !cells[0].eq_ignore_ascii_case("Function Name") {
             let stats: Vec<Option<u64>> = cells[1..5]
                 .iter()
-                .map(|c| {
-                    c.replace(',', "")
-                        .parse::<u64>()
-                        .ok()
-                })
+                .map(|c| c.replace(',', "").parse::<u64>().ok())
                 .collect();
-            if stats
-                .iter()
-                .all(|n| n.is_some())
-            {
+            if stats.iter().all(|n| n.is_some()) {
                 let fname = cells[0].clone();
                 let avg = stats[1].unwrap(); // cells[2] = avg column
                 match current.as_deref() {
@@ -1115,14 +1098,14 @@ fn parse_gas_report(
                             order.push(fname.clone());
                         }
                         orig.insert(fname, avg);
-                    }
+                    },
                     Some(c) if c == opt_name => {
                         if !orig.contains_key(&fname) && !opt.contains_key(&fname) {
                             order.push(fname.clone());
                         }
                         opt.insert(fname, avg);
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
         }
@@ -1131,12 +1114,8 @@ fn parse_gas_report(
     order
         .into_iter()
         .map(|name| {
-            let go = orig
-                .get(&name)
-                .copied();
-            let gp = opt
-                .get(&name)
-                .copied();
+            let go = orig.get(&name).copied();
+            let gp = opt.get(&name).copied();
             let saved = match (go, gp) {
                 (Some(b), Some(a)) => Some(b as i64 - a as i64),
                 _ => None,
@@ -1154,31 +1133,20 @@ fn parse_gas_report(
 /// Group forge's `[PASS]`/`[FAIL...]` result lines by test suite. Suite headers
 /// look like `Ran 5 tests for test/Equivalence.t.sol:EquivalenceTest`.
 fn suite_result_lines(output: &str) -> std::collections::HashMap<String, Vec<String>> {
-    let mut map: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let mut current: Option<String> = None;
     for line in output.lines() {
         if line.starts_with("Ran ")
-            && let Some(rest) = line
-                .split(" for ")
-                .nth(1)
-            && let Some(suite) = rest
-                .split(':')
-                .nth(1)
+            && let Some(rest) = line.split(" for ").nth(1)
+            && let Some(suite) = rest.split(':').nth(1)
         {
-            current = Some(
-                suite
-                    .trim()
-                    .to_string(),
-            );
+            current = Some(suite.trim().to_string());
             continue;
         }
         if (line.starts_with("[PASS]") || line.starts_with("[FAIL"))
             && let Some(suite) = &current
         {
-            map.entry(suite.clone())
-                .or_default()
-                .push(line.to_string());
+            map.entry(suite.clone()).or_default().push(line.to_string());
         }
     }
     map
@@ -1186,10 +1154,7 @@ fn suite_result_lines(output: &str) -> std::collections::HashMap<String, Vec<Str
 
 /// Whether `test_eq_<name>` passed within one suite's result lines. Matches on
 /// `test_eq_<name>(` so `transfer` cannot collide with `transferFrom`.
-fn suite_test_passed(
-    lines: &[String],
-    fn_name: &str,
-) -> bool {
+fn suite_test_passed(lines: &[String], fn_name: &str) -> bool {
     let needle = format!("test_eq_{fn_name}(");
     lines
         .iter()
@@ -1215,10 +1180,7 @@ mod tests {
     #[test]
     fn ctor_args_single_address() {
         let src = "contract C { constructor(address _token) { } }";
-        assert_eq!(
-            synthesize_constructor_args(src),
-            "address(0)"
-        );
+        assert_eq!(synthesize_constructor_args(src), "address(0)");
     }
 
     #[test]
@@ -1233,7 +1195,8 @@ mod tests {
 
     #[test]
     fn ctor_args_array_and_payable_and_contract() {
-        let src = "contract C { constructor(address[] memory xs, address payable to, IERC20 t) { } }";
+        let src =
+            "contract C { constructor(address[] memory xs, address payable to, IERC20 t) { } }";
         assert_eq!(
             synthesize_constructor_args(src),
             "new address[](0), payable(address(0)), IERC20(address(0))"
@@ -1243,10 +1206,7 @@ mod tests {
     #[test]
     fn ctor_args_fixed_bytes() {
         let src = "contract C { constructor(bytes32 root) { } }";
-        assert_eq!(
-            synthesize_constructor_args(src),
-            "bytes32(0)"
-        );
+        assert_eq!(synthesize_constructor_args(src), "bytes32(0)");
     }
 
     #[test]
@@ -1304,6 +1264,108 @@ mod tests {
     }
 
     #[test]
+    fn ctor_args_nested_fixed_array_recurses_instead_of_casting() {
+        // `uint256[2]` starts with "uint", but `uint256[2](0)` is not a cast.
+        let src = "contract C { constructor(uint256[2][2] memory xs) {} }";
+        assert_eq!(
+            synthesize_constructor_args(src),
+            "[[uint256(0), uint256(0)], [uint256(0), uint256(0)]]"
+        );
+    }
+
+    // ── contract selection (C3): the sandbox must instantiate the SUBJECT ──────────
+    #[test]
+    fn contract_name_skips_helpers_and_takes_the_subject() {
+        let src = "contract Helper { function h() public {} }\n\
+                   contract Main { function m() public {} }";
+        assert_eq!(extract_sol_contract_name(src).as_deref(), Some("Main"));
+    }
+
+    #[test]
+    fn contract_name_skips_interfaces_libraries_and_abstract() {
+        let src = "interface IThing { function t() external; }\n\
+                   library L { function l() internal pure {} }\n\
+                   abstract contract Base { function b() public virtual; }\n\
+                   contract Impl is Base { function b() public override {} }";
+        assert_eq!(extract_sol_contract_name(src).as_deref(), Some("Impl"));
+    }
+
+    #[test]
+    fn contract_name_prefers_most_derived_even_when_base_declared_last() {
+        // "last concrete contract" alone would wrongly pick ERC20 here.
+        let src = "contract Token is ERC20 { function t() public {} }\n\
+                   contract ERC20 { function e() public {} }";
+        assert_eq!(extract_sol_contract_name(src).as_deref(), Some("Token"));
+    }
+
+    #[test]
+    fn contract_name_falls_back_to_text_scan_when_source_does_not_parse() {
+        let src = "contract Broken { function f( <<<not solidity>>> }";
+        assert_eq!(extract_sol_contract_name(src).as_deref(), Some("Broken"));
+    }
+
+    // ── renaming (C3): must not match a prefix of a longer contract name ───────────
+    #[test]
+    fn rename_contract_does_not_hit_a_longer_prefixed_name() {
+        let src = "contract MainHelper { function h() public {} }\n\
+                   contract Main { function m() public {} }";
+        let out = rename_contract(src, "Main", "MainOptimized");
+        assert!(
+            out.contains("contract MainHelper {"),
+            "helper was renamed: {out}"
+        );
+        assert!(
+            out.contains("contract MainOptimized {"),
+            "subject not renamed: {out}"
+        );
+    }
+
+    // ── cleaning (C3): prose heuristics must not touch user Solidity ───────────────
+    #[test]
+    fn strip_fence_lines_preserves_solidity_that_looks_like_prose() {
+        // `**` is exponentiation and `- ` is subtraction on a wrapped line.
+        let src = "contract C {\n  uint256 a = 2\n    ** 8;\n  uint256 b = x\n    - Y;\n}";
+        assert_eq!(strip_fence_lines(src), src);
+    }
+
+    #[test]
+    fn clean_for_forge_would_have_corrupted_that_same_source() {
+        // Documents exactly why the original is no longer run through this.
+        let src = "contract C {\n  uint256 a = 2\n    ** 8;\n  uint256 b = x\n    - Y;\n}";
+        assert_ne!(clean_for_forge(src), src);
+    }
+
+    #[test]
+    fn strip_fence_lines_still_drops_fences() {
+        assert_eq!(
+            strip_fence_lines("```solidity\ncontract C {}\n```"),
+            "contract C {}"
+        );
+    }
+
+    #[test]
+    fn clean_for_forge_drops_model_prose() {
+        let src = "**Optimized version:**\ncontract C {}\n- Uses custom errors\n*(note)*";
+        assert_eq!(clean_for_forge(src), "contract C {}");
+    }
+
+    // ── verification coverage (C1) ────────────────────────────────────────────────
+    #[test]
+    fn unverified_unions_broken_and_missing_tests() {
+        let er = EquivResult {
+            invalid: vec!["transfer".into()],
+            missing: vec!["approve".into(), "mint".into()],
+            ..Default::default()
+        };
+        assert_eq!(er.unverified(), vec!["approve", "mint", "transfer"]);
+    }
+
+    #[test]
+    fn unverified_is_empty_when_every_function_was_tested() {
+        assert!(EquivResult::default().unverified().is_empty());
+    }
+
+    #[test]
     fn gas_report_parses_per_function_avg() {
         let report = "\
 | src/Original.sol:RewardPool contract |                 |       |        |       |         |
@@ -1315,17 +1377,11 @@ mod tests {
 | distribute                           | 8000            | 15000 | 15000  | 22000 | 2       |
 | stake                                | 30000           | 31000 | 31000  | 32000 | 1       |";
         let out = parse_gas_report(report, "RewardPool", "RewardPoolOptimized");
-        let dist = out
-            .iter()
-            .find(|f| f.name == "distribute")
-            .unwrap();
+        let dist = out.iter().find(|f| f.name == "distribute").unwrap();
         assert_eq!(dist.gas_original, Some(23456));
         assert_eq!(dist.gas_optimized, Some(15000));
         assert_eq!(dist.gas_saved, Some(8456));
-        let stake = out
-            .iter()
-            .find(|f| f.name == "stake")
-            .unwrap();
+        let stake = out.iter().find(|f| f.name == "stake").unwrap();
         assert_eq!(stake.gas_saved, Some(10000));
     }
 }

@@ -28,12 +28,12 @@ use serde_json::json;
 use tokio::sync::OnceCell;
 use tracing::info;
 
-use crate::{
-    COLLECTION,
+use super::{
     db::{Turso, TursoArg},
     embedding::FastembedAdapter,
     normalize::PatternMatcher,
 };
+use crate::state::COLLECTION;
 
 const TOKEN_CATS: [&str; 5] = ["erc20", "erc721", "erc1155", "erc2981", "accounts"];
 
@@ -83,10 +83,7 @@ impl GasliteIndex {
     /// Retrieve (memoised). The composed search runs once; later calls clone the
     /// cached result.
     async fn retrieve(&self) -> Result<Vec<Hit>, VectorStoreError> {
-        let hits = self
-            .cache
-            .get_or_try_init(|| self.compute())
-            .await?;
+        let hits = self.cache.get_or_try_init(|| self.compute()).await?;
         Ok(hits.clone())
     }
 
@@ -109,21 +106,16 @@ impl GasliteIndex {
             .embed_text(&self.query)
             .await
             .map_err(VectorStoreError::EmbeddingError)?;
-        let qvec: Vec<f32> = emb
-            .vec
-            .iter()
-            .map(|f| *f as f32)
-            .collect();
+        let qvec: Vec<f32> = emb.vec.iter().map(|f| *f as f32).collect();
 
         let is_token = self
             .category
             .map(|c| TOKEN_CATS.contains(&c))
             .unwrap_or(false);
 
-        // 2. All Qdrant searches run CONCURRENTLY — they only depend on the
-        //    embedding, so there is no reason to serialize the round-trips.
-        //    Token contracts: category-filtered (2) + general (1) + antipattern (2).
-        //    Everything else: plain top-3 + antipattern (2).
+        // 2. All Qdrant searches run CONCURRENTLY — they only depend on the embedding, so there is
+        //    no reason to serialize the round-trips. Token contracts: category-filtered (2) +
+        //    general (1) + antipattern (2). Everything else: plain top-3 + antipattern (2).
         let anti_search = SearchPointsBuilder::new(COLLECTION, qvec.clone(), 2)
             .with_payload(true)
             .filter(QFilter::must([Condition::matches(
@@ -131,79 +123,50 @@ impl GasliteIndex {
                 "antipattern".to_string(),
             )]));
         let (pattern_hits, anti_hits) = if is_token {
-            let cat = self
-                .category
-                .unwrap();
+            let cat = self.category.unwrap();
             let (cat_r, gen_r, anti_r) = tokio::join!(
-                self.qdrant
-                    .search_points(
-                        SearchPointsBuilder::new(COLLECTION, qvec.clone(), 2)
-                            .with_payload(true)
-                            .filter(QFilter::must([Condition::matches(
-                                "category",
-                                cat.to_string()
-                            )])),
-                    ),
-                self.qdrant
-                    .search_points(
-                        SearchPointsBuilder::new(COLLECTION, qvec.clone(), 1)
-                            .with_payload(true)
-                            .filter(QFilter::must_not(
-                                TOKEN_CATS
-                                    .iter()
-                                    .map(|c| Condition::matches("category", c.to_string()))
-                                    .collect::<Vec<_>>(),
-                            )),
-                    ),
-                self.qdrant
-                    .search_points(anti_search),
+                self.qdrant.search_points(
+                    SearchPointsBuilder::new(COLLECTION, qvec.clone(), 2)
+                        .with_payload(true)
+                        .filter(QFilter::must([Condition::matches(
+                            "category",
+                            cat.to_string()
+                        )])),
+                ),
+                self.qdrant.search_points(
+                    SearchPointsBuilder::new(COLLECTION, qvec.clone(), 1)
+                        .with_payload(true)
+                        .filter(QFilter::must_not(
+                            TOKEN_CATS
+                                .iter()
+                                .map(|c| Condition::matches("category", c.to_string()))
+                                .collect::<Vec<_>>(),
+                        )),
+                ),
+                self.qdrant.search_points(anti_search),
             );
-            let mut combined = cat_r
-                .map_err(qerr)?
-                .result;
-            combined.extend(
-                gen_r
-                    .map_err(qerr)?
-                    .result,
-            );
-            (
-                combined,
-                anti_r
-                    .map_err(qerr)?
-                    .result,
-            )
+            let mut combined = cat_r.map_err(qerr)?.result;
+            combined.extend(gen_r.map_err(qerr)?.result);
+            (combined, anti_r.map_err(qerr)?.result)
         } else {
             let (plain_r, anti_r) = tokio::join!(
-                self.qdrant
-                    .search_points(
-                        SearchPointsBuilder::new(COLLECTION, qvec.clone(), 3).with_payload(true),
-                    ),
-                self.qdrant
-                    .search_points(anti_search),
+                self.qdrant.search_points(
+                    SearchPointsBuilder::new(COLLECTION, qvec.clone(), 3).with_payload(true),
+                ),
+                self.qdrant.search_points(anti_search),
             );
-            (
-                plain_r
-                    .map_err(qerr)?
-                    .result,
-                anti_r
-                    .map_err(qerr)?
-                    .result,
-            )
+            (plain_r.map_err(qerr)?.result, anti_r.map_err(qerr)?.result)
         };
 
-        // 3. Collect candidate ids (deduped across sources, in injection order)
-        //    together with how each was found — which decides its score + format.
+        // 3. Collect candidate ids (deduped across sources, in injection order) together with how
+        //    each was found — which decides its score + format.
         let mut seen: HashSet<String> = HashSet::new();
         let mut candidates: Vec<(String, HitKind)> = Vec::new();
         for hit in pattern_hits {
             if let Some(id) = hit
                 .payload
                 .get("pattern_id")
-                .map(|v| {
-                    v.to_string()
-                        .trim()
-                        .replace('"', "")
-                })
+                .map(|v| v.to_string().trim().replace('"', ""))
                 && seen.insert(id.clone())
             {
                 candidates.push((id, HitKind::Pattern(hit.score as f64)));
@@ -213,19 +176,13 @@ impl GasliteIndex {
             if let Some(id) = hit
                 .payload
                 .get("pattern_id")
-                .map(|v| {
-                    v.to_string()
-                        .trim()
-                        .replace('"', "")
-                })
+                .map(|v| v.to_string().trim().replace('"', ""))
                 && seen.insert(id.clone())
             {
                 candidates.push((id, HitKind::Anti(hit.score as f64)));
             }
         }
-        let struct_ids = self
-            .matcher
-            .match_function(&self.query);
+        let struct_ids = self.matcher.match_function(&self.query);
         for id in &struct_ids {
             if seen.insert(id.clone()) {
                 candidates.push((id.clone(), HitKind::Structural));
@@ -237,8 +194,8 @@ impl GasliteIndex {
             return Ok(vec![]);
         }
 
-        // 4. ONE batched Turso fetch for every candidate (previously one HTTP
-        //    round-trip per id — the dominant retrieval cost).
+        // 4. ONE batched Turso fetch for every candidate (previously one HTTP round-trip per id —
+        //    the dominant retrieval cost).
         let placeholders = vec!["?"; candidates.len()].join(",");
         let sql = format!(
             "SELECT id, title, explanation, yul_optimized, risk_level, when_not_to_apply, \
@@ -255,10 +212,7 @@ impl GasliteIndex {
             .map_err(|e| VectorStoreError::DatastoreError(e.into()))?;
         let mut by_id: HashMap<String, &HashMap<String, serde_json::Value>> = HashMap::new();
         for row in &rows {
-            if let Some(id) = row
-                .get("id")
-                .and_then(|v| v.as_str())
-            {
+            if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
                 by_id.insert(id.to_string(), row);
             }
         }
@@ -346,10 +300,7 @@ enum HitKind {
 
 /// Map a Qdrant error into rig's vector-store error.
 fn qerr<E: std::fmt::Display>(e: E) -> VectorStoreError {
-    VectorStoreError::DatastoreError(
-        e.to_string()
-            .into(),
-    )
+    VectorStoreError::DatastoreError(e.to_string().into())
 }
 
 impl VectorStoreIndex for GasliteIndex {
@@ -367,13 +318,8 @@ impl VectorStoreIndex for GasliteIndex {
         // signal patterns survive: structural "Seeker" matches (score 1.0) and the
         // best embedding hits stay; weak/antipattern hits drop first.
         let n = req.samples() as usize;
-        let mut hits = self
-            .retrieve()
-            .await?;
-        hits.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let mut hits = self.retrieve().await?;
+        hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         if n > 0 {
             hits.truncate(n);
         }
